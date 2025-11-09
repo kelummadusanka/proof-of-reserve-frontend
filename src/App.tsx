@@ -9,7 +9,7 @@ import Assets from "./pages/Assets";
 import PegStatus from "./pages/PegStatus";
 import NotFound from "./pages/NotFound";
 import Navbar from "./components/Navbar";
-
+import EthCustodyDeposit from "./pages/EthCustodyDeposit";
 
 
 const queryClient = new QueryClient();
@@ -27,6 +27,7 @@ const App = () => (
               <Route path="/" element={<Index />} />
               <Route path="/assets" element={<Assets />} />
               <Route path="/pegstatus" element={<PegStatus />} />
+              <Route path="/deposit/eth-custody" element={<EthCustodyDeposit />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
             </Routes>

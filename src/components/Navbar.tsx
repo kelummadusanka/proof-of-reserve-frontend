@@ -51,6 +51,18 @@ const Navbar = () => {
               <RefreshCw className="w-4 h-4" />
               Peg Status
             </Link>
+
+            <Link
+              to="/deposit/eth-custody"
+              className={`px-6 py-2.5 rounded-lg font-medium transition-all flex items-center gap-2 ${
+                isActive("/deposit/eth-custody")
+                  ? "bg-primary text-primary-foreground glow-effect"
+                  : "bg-secondary/50 text-foreground hover:bg-secondary"
+              }`}
+            >
+              <Wallet className="w-4 h-4" />
+              ETH Deposit
+            </Link>
           </div>
         </div>
       </div>

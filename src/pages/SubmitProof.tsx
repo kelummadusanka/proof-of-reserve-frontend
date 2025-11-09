@@ -14,8 +14,10 @@ const substrateAddressRegex = /^(5[1-9A-HJ-NP-Za-km-z]{47}|0x[a-fA-F0-9]{64})$/;
 const proofSchema = z.object({
   proof: z.string().min(1, "Proof is required"),
   accountOffchain: z.string().min(1, "Offchain account is required"),
-  accountOnchain: z.string().min(1, "Onchain account is required"),
-   accountOnchain: z.string().regex(substrateAddressRegex, "Invalid Substrate address format"),
+  accountOnchain: z
+  .string()
+  .min(1, "Onchain account is required")
+  .regex(substrateAddressRegex, "Invalid Substrate address format"),
   offchainName: z.string().min(1, "Offchain name is required"),
   valueOffchain: z.coerce.number().min(0, "Value must be positive"),
   ratio: z.coerce.number().min(1, "Ratio must be at least 1"),
