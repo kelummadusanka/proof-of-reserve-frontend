@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { Database, Wallet } from "lucide-react";
+import { Database, Wallet,RefreshCw} from "lucide-react";
 
 const Navbar = () => {
   const location = useLocation();
@@ -38,6 +38,18 @@ const Navbar = () => {
             >
               <Wallet className="w-4 h-4" />
               Assets
+            </Link>
+
+            <Link
+              to="/pegstatus"
+              className={`px-6 py-2.5 rounded-lg font-medium transition-all flex items-center gap-2 ${
+                isActive("/pegstatus")
+                  ? "bg-primary text-primary-foreground glow-effect"
+                  : "bg-secondary/50 text-foreground hover:bg-secondary"
+              }`}
+            >
+              <RefreshCw className="w-4 h-4" />
+              Peg Status
             </Link>
           </div>
         </div>
