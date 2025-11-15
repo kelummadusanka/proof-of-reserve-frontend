@@ -1,36 +1,45 @@
 import { Coins, RefreshCw, Clock } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useEffect, useState } from "react";
 import { Progress } from "@/components/ui/progress"; // from shadcn/ui
+import { ethers } from "ethers";
 
-// Mock data
-const mockBalance = {
-  total: 1250, // total reserves
-  circulation: 1250, // total circulating tokens
-};
+const CONTRACT_ADDRESS = "0x964A2ce75AB6A70E95C7D47FBe2cc954B04C0E69";
+const ABI = ["function custodyWallet() view returns (address)", "function balanceOf(address) view returns (uint256)"];
 
 const PegStatus = () => {
-  // Compute peg ratio
-  const pegRatio = useMemo(() => {
-    const ratio = (mockBalance.total / mockBalance.circulation) * 100;
-    return Math.min(ratio, 100).toFixed(2);
+  const [totalReserve, setTotalReserve] = useState<number>(0);
+  const [circulation, setCirculation] = useState<number>(1250); // keep as mock or replace later
+
+  // Load ETH balance of custody wallet
+  useEffect(() => {
+    const loadBalance = async () => {
+      if (!window.ethereum) return;
+      try {
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const contract = new ethers.Contract(CONTRACT_ADDRESS, ["function custodyWallet() view returns (address)"], provider);
+        const custodyWallet: string = await contract.custodyWallet();
+        const balance = await provider.getBalance(custodyWallet);
+        setTotalReserve(parseFloat(ethers.formatEther(balance)));
+      } catch (err) {
+        console.error("Failed to load custody ETH balance", err);
+      }
+    };
+
+    loadBalance();
   }, []);
 
-  // Determine color and text for peg health
+  // Compute peg ratio
+  const pegRatio = useMemo(() => {
+    const ratio = (totalReserve / circulation) * 100;
+    return Math.min(ratio, 100).toFixed(2);
+  }, [totalReserve, circulation]);
+
   const pegStatus =
     pegRatio >= 99
-      ? {
-          color: "green",
-          label: "Fully backed — Peg is stable",
-        }
+      ? { color: "green", label: "Fully backed — Peg is stable" }
       : pegRatio >= 95
-      ? {
-          color: "yellow",
-          label: "Slight deviation — Monitor reserves",
-        }
-      : {
-          color: "red",
-          label: "Unpegged — Action required",
-        };
+      ? { color: "yellow", label: "Slight deviation — Monitor reserves" }
+      : { color: "red", label: "Unpegged — Action required" };
 
   return (
     <div className="min-h-[calc(100vh-80px)] py-12 px-6">
@@ -84,7 +93,7 @@ const PegStatus = () => {
 
         {/* Peg Overview Cards */}
         <div className="grid md:grid-cols-3 gap-6 mb-12">
-          {/* Total Reserves */}
+          {/* Total Reserves (ETH Custody) */}
           <div className="glass-card p-6 rounded-2xl">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-12 h-12 rounded-xl bg-accent/20 flex items-center justify-center">
@@ -93,12 +102,12 @@ const PegStatus = () => {
               <div>
                 <p className="text-sm text-muted-foreground">Total Reserves</p>
                 <p className="text-3xl font-bold text-accent">
-                  ${mockBalance.total.toLocaleString()}
+                  {totalReserve.toFixed(4)} ETH
                 </p>
               </div>
             </div>
             <p className="text-sm text-muted-foreground">
-              Total verified on-chain reserves backing circulation.
+              Total ETH in custody wallet backing circulation.
             </p>
           </div>
 
@@ -141,7 +150,7 @@ const PegStatus = () => {
               <div>
                 <p className="text-sm text-muted-foreground">Circulation Supply</p>
                 <p className="text-3xl font-bold text-accent">
-                  ${mockBalance.circulation.toLocaleString()}
+                  ${circulation.toLocaleString()}
                 </p>
               </div>
             </div>

@@ -1,4 +1,5 @@
-// components/EthCustodyDeposit.tsx
+"use client";
+
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -7,26 +8,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { Loader2, Wallet, AlertCircle, Send, Coins } from "lucide-react";
+import { Loader2, Wallet, Send, CheckCircle2 } from "lucide-react";
 import { ethers } from "ethers";
-import { CheckCircle2 } from "lucide-react";
 
-// ABI of your contract
+// ETH-only ABI
 const ABI = [
   "function custodyWallet() view returns (address)",
-  "function depositERC20(address token, address recipient, uint256 amount)",
-  "event DepositReceived(address indexed sender, address indexed recipient, uint256 amount)",
-  "receive() external payable"
+  "function depositETH(string polkadotRecipient, string extraData) payable",
+  "event DepositReceived(address indexed ethSender, string polkadotRecipient, address indexed token, uint256 amount, uint256 nonce, uint256 timestamp, string extraData)"
 ];
 
-const CONTRACT_ADDRESS = "YOUR_CONTRACT_ADDRESS_HERE"; // Replace with your deployed Sepolia address
+const CONTRACT_ADDRESS = "0x964A2ce75AB6A70E95C7D47FBe2cc954B04C0E69";
 
+// Validation
 const depositSchema = z.object({
-  depositType: z.enum(["eth", "erc20"]),
-  ethAmount: z.string().refine((v) => parseFloat(v) > 0, "Amount must be greater than 0").optional(),
-  tokenAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid token address").optional(),
-  erc20Amount: z.string().refine((v) => parseFloat(v) > 0, "Amount must be greater than 0").optional(),
-  recipient: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address").optional(),
+  ethAmount: z.string()
+    .refine((v) => parseFloat(v) > 0, "Amount must be greater than 0"),
+  polkadotRecipient: z.string().min(1, "Polkadot recipient is required"),
+  extraData: z.string().optional()
 });
 
 type DepositFormData = z.infer<typeof depositSchema>;
@@ -40,73 +39,56 @@ declare global {
 const EthCustodyDeposit = () => {
   const [isConnecting, setIsConnecting] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [custodyWallet, setCustodyWallet] = useState<string>("");
-  const [depositType, setDepositType] = useState<"eth" | "erc20">("eth");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const {
     register,
     handleSubmit,
     formState: { errors },
-    watch,
-    reset,
-    setValue,
+    reset
   } = useForm<DepositFormData>({
     resolver: zodResolver(depositSchema),
     defaultValues: {
-      depositType: "eth",
-      recipient: "",
-    },
+      ethAmount: "",
+      polkadotRecipient: "",
+      extraData: ""
+    }
   });
 
-  const watchedDepositType = watch("depositType") || "eth";
-
-  useEffect(() => {
-    setDepositType(watchedDepositType as "eth" | "erc20");
-    if (watchedDepositType === "eth") {
-      setValue("tokenAddress", "");
-      setValue("erc20Amount", "");
-    } else {
-      setValue("ethAmount", "");
-    }
-  }, [watchedDepositType, setValue]);
-
+  // Connect wallet
   const connectWallet = async () => {
-    if (typeof window.ethereum === "undefined") {
-      toast.error("MetaMask not detected", {
-        description: "Please install MetaMask to use this feature.",
-      });
+    if (!window.ethereum) {
+      toast.error("MetaMask not detected");
       return;
     }
 
     setIsConnecting(true);
     try {
-      const accounts = await window.ethereum.request({
-        method: "eth_requestAccounts",
-      });
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       setAccount(accounts[0]);
-      toast.success("Wallet connected!", {
-        description: `Connected: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`,
-      });
-      await loadCustodyWallet(accounts[0]);
+      toast.success(`Connected: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}`);
+      await loadCustodyWallet();
     } catch (err: any) {
-      toast.error("Failed to connect wallet", { description: err.message });
+      toast.error(err.message || "Failed to connect wallet");
     } finally {
       setIsConnecting(false);
     }
   };
 
-  const loadCustodyWallet = async (userAddress: string) => {
+  // Load custody wallet
+  const loadCustodyWallet = async () => {
     try {
       const provider = new ethers.BrowserProvider(window.ethereum);
       const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
-      const wallet = await contract.custodyWallet();
-      setCustodyWallet(wallet);
-    } catch (err) {
-      console.error("Failed to load custody wallet", err);
+      const cw = await contract.custodyWallet();
+      setCustodyWallet(cw);
+    } catch {
+      toast.error("Failed to load custody wallet");
     }
   };
 
+  // Handle ETH deposit
   const onSubmit = async (data: DepositFormData) => {
     if (!account) {
       toast.error("Wallet not connected");
@@ -114,53 +96,38 @@ const EthCustodyDeposit = () => {
     }
 
     setIsSubmitting(true);
+
     try {
       const provider = new ethers.BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
       const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
 
-      let tx;
-      if (data.depositType === "eth") {
-        const amount = ethers.parseEther(data.ethAmount || "0");
-        tx = await contract.getFunction("receive").send({ value: amount });
-        toast.success("ETH deposit sent!", { description: `Hash: ${tx.hash.slice(0, 10)}...` });
-      } else {
-        const tokenContract = new ethers.Contract(data.tokenAddress!, [
-          "function approve(address spender, uint256 amount) returns (bool)",
-          "function allowance(address owner, address spender) view returns (uint256)",
-          "function decimals() view returns (uint8)",
-          "function symbol() view returns (string)",
-        ], signer);
+      const value = ethers.parseEther(data.ethAmount);
 
-        const decimals = await tokenContract.decimals();
-        const amount = ethers.parseUnits(data.erc20Amount || "0", decimals);
-        const allowance = await tokenContract.allowance(account, CONTRACT_ADDRESS);
+      const tx = await contract.depositETH(
+        data.polkadotRecipient,
+        data.extraData || "",
+        { value }
+      );
 
-        if (allowance < amount) {
-          const approveTx = await tokenContract.approve(CONTRACT_ADDRESS, amount);
-          await approveTx.wait();
-          toast.success("Approved token spending");
+      toast.info("Transaction sent… waiting for confirmation");
+
+      const receipt = await tx.wait();
+
+      const shortHash = tx.hash.slice(0, 10) + "…";
+
+      toast.success(`Deposit confirmed! Hash: ${shortHash}`, {
+        action: {
+          label: "View",
+          onClick: () => {
+            window.open(`https://sepolia.etherscan.io/tx/${tx.hash}`, "_blank");
+          }
         }
-
-        tx = await contract.depositERC20(
-          data.tokenAddress,
-          data.recipient || account,
-          amount
-        );
-        toast.success("ERC20 deposit successful!", { description: `Hash: ${tx.hash.slice(0, 10)}...` });
-      }
-
-      await tx.wait();
-      toast.success("Deposit confirmed!", {
-        description: "Your funds are now in custody.",
-        icon: <CheckCircle2 className="w-5 h-5" />,
       });
+
       reset();
     } catch (err: any) {
-      console.error(err);
-      toast.error("Transaction failed", {
-        description: err.reason || err.message || "Unknown error",
-      });
+      toast.error(err.reason || err.message || "Transaction failed");
     } finally {
       setIsSubmitting(false);
     }
@@ -169,17 +136,17 @@ const EthCustodyDeposit = () => {
   return (
     <div className="min-h-[calc(100vh-80px)] py-12 px-6">
       <div className="container mx-auto max-w-2xl">
+        
         <div className="text-center mb-12">
-          <h1 className="text-5xl font-bold mb-4 gradient-text">
-            Deposit to EthCustody
-          </h1>
+          <h1 className="text-5xl font-bold mb-4 gradient-text">Deposit ETH</h1>
           <p className="text-muted-foreground text-lg">
-            Securely deposit ETH or ERC20 tokens into custody
+            Securely deposit native ETH into custody
           </p>
         </div>
 
-        {/* Connection Status */}
+        {/* Wallet Status */}
         <div className="mb-6 space-y-3">
+
           <div className={`glass-card p-4 rounded-lg flex items-center justify-between ${account ? 'border-green-500/50' : 'border-orange-500/50'}`}>
             <div className="flex items-center gap-3">
               <Wallet className="w-5 h-5" />
@@ -194,13 +161,9 @@ const EthCustodyDeposit = () => {
                 <span className="font-medium">No Wallet Connected</span>
               )}
             </div>
+
             {!account && (
-              <Button
-                onClick={connectWallet}
-                disabled={isConnecting}
-                variant="outline"
-                size="sm"
-              >
+              <Button onClick={connectWallet} disabled={isConnecting} variant="outline" size="sm">
                 {isConnecting ? "Connecting..." : "Connect MetaMask"}
               </Button>
             )}
@@ -209,98 +172,50 @@ const EthCustodyDeposit = () => {
           {custodyWallet && (
             <div className="glass-card p-4 rounded-lg border-blue-500/50">
               <p className="text-sm font-medium">Custody Wallet</p>
-              <p className="text-xs text-muted-foreground break-all">
-                {custodyWallet}
-              </p>
+              <p className="text-xs text-muted-foreground break-all">{custodyWallet}</p>
             </div>
           )}
         </div>
 
+        {/* Deposit Form */}
         <form onSubmit={handleSubmit(onSubmit)} className="glass-card p-8 rounded-2xl space-y-6">
-          {/* Deposit Type Toggle */}
-          <div className="flex gap-4">
-            <Button
-              type="button"
-              variant={depositType === "eth" ? "default" : "outline"}
-              onClick={() => setValue("depositType", "eth")}
-              className="flex-1 h-12"
-            >
-              <Send className="w-4 h-4 mr-2" />
-              Deposit ETH
-            </Button>
-            <Button
-              type="button"
-              variant={depositType === "erc20" ? "default" : "outline"}
-              onClick={() => setValue("depositType", "erc20")}
-              className="flex-1 h-12"
-            >
-              <Coins className="w-4 h-4 mr-2" />
-              Deposit ERC20
-            </Button>
-          </div>
-
-          <input type="hidden" {...register("depositType")} />
-
-          {depositType === "eth" ? (
-            <div className="space-y-2">
-              <Label htmlFor="ethAmount">ETH Amount</Label>
-              <Input
-                id="ethAmount"
-                type="number"
-                step="0.000000000000000001"
-                placeholder="0.05"
-                {...register("ethAmount")}
-                className="bg-input border-border h-12"
-              />
-              {errors.ethAmount && (
-                <p className="text-destructive text-sm">{errors.ethAmount.message}</p>
-              )}
-            </div>
-          ) : (
-            <>
-              <div className="space-y-2">
-                <Label htmlFor="tokenAddress">Token Contract Address</Label>
-                <Input
-                  id="tokenAddress"
-                  placeholder="0x..."
-                  {...register("tokenAddress")}
-                  className="bg-input border-border h-12"
-                />
-                {errors.tokenAddress && (
-                  <p className="text-destructive text-sm">{errors.tokenAddress.message}</p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="erc20Amount">Token Amount</Label>
-                <Input
-                  id="erc20Amount"
-                  type="number"
-                  step="any"
-                  placeholder="100.0"
-                  {...register("erc20Amount")}
-                  className="bg-input border-border h-12"
-                />
-                {errors.erc20Amount && (
-                  <p className="text-destructive text-sm">{errors.erc20Amount.message}</p>
-                )}
-              </div>
-            </>
-          )}
 
           <div className="space-y-2">
-            <Label htmlFor="recipient">
-              Recipient (optional - defaults to your address)
-            </Label>
+            <Label htmlFor="ethAmount">ETH Amount</Label>
             <Input
-              id="recipient"
-              placeholder={account || "0x..."}
-              {...register("recipient")}
+              id="ethAmount"
+              type="number"
+              step="0.000000000000000001"
+              placeholder="0.05"
+              {...register("ethAmount")}
               className="bg-input border-border h-12"
             />
-            {errors.recipient && (
-              <p className="text-destructive text-sm">{errors.recipient.message}</p>
+            {errors.ethAmount && (
+              <p className="text-destructive text-sm">{errors.ethAmount.message}</p>
             )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="polkadotRecipient">Polkadot Recipient</Label>
+            <Input
+              id="polkadotRecipient"
+              placeholder="14xyz..."
+              {...register("polkadotRecipient")}
+              className="bg-input border-border h-12"
+            />
+            {errors.polkadotRecipient && (
+              <p className="text-destructive text-sm">{errors.polkadotRecipient.message}</p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="extraData">Extra Data (optional)</Label>
+            <Input
+              id="extraData"
+              placeholder="Any note"
+              {...register("extraData")}
+              className="bg-input border-border h-12"
+            />
           </div>
 
           <Button
@@ -311,12 +226,12 @@ const EthCustodyDeposit = () => {
             {isSubmitting ? (
               <>
                 <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                Sending Deposit...
+                Sending Deposit…
               </>
             ) : (
               <>
                 <CheckCircle2 className="w-5 h-5 mr-2" />
-                Deposit to Custody
+                Deposit ETH
               </>
             )}
           </Button>
