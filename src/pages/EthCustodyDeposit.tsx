@@ -17,13 +17,12 @@ import { Keyring } from "@polkadot/keyring";
 import { web3Accounts, web3Enable, web3FromAddress } from "@polkadot/extension-dapp";
 
 // === UPDATE THESE TO YOUR LATEST CONTRACT ===
-const CONTRACT_ADDRESS = "0xd75FF434fC1A97d41E6C6123222fa96982717B3a";
+const CONTRACT_ADDRESS = "0xE2e65b072d513dC155dAc3fCe65473D2B0f058c3";
 const BRIDGE_ABI = [
   "function custodyWallet() view returns (address)",
   "function depositETH(string polkadotRecipient, string extraData) payable",
   "function getContractBalance() view returns (uint256)",
-  "function requestWithdrawal(address ethRecipient, uint256 amount, string polkadotSender, string polkadotTxHash)",
-  "function completeWithdrawal(uint256 withdrawalId)",
+  "function processWithdrawal(address ethRecipient, uint256 amount, string polkadotSender, string polkadotTxHash) returns (uint256)",
   "function withdrawalNonce() view returns (uint256)",
   "event DepositReceived(address indexed ethSender, string polkadotRecipient, address indexed token, uint256 amount, uint256 nonce, uint256 timestamp, string extraData)",
   "event WithdrawalCompleted(uint256 indexed withdrawalId, address indexed ethRecipient, uint256 amount, uint256 timestamp)"
@@ -57,10 +56,9 @@ const DEPOSIT_STEPS = [
 ];
 
 const WITHDRAWAL_STEPS = [
-  { id: 1, label: "Transfer KETH to Alice" },
-  { id: 2, label: "Burning KETH (Alice)" },
-  { id: 3, label: "Requesting Withdrawal" },
-  { id: 4, label: "Releasing ETH" }
+  { id: 1, label: "Transfer KETH" },
+  { id: 2, label: "Burning KETH " },
+  { id: 3, label: "Processing Withdrawal & Releasing ETH" }
 ];
 
 interface Transaction {
@@ -227,11 +225,9 @@ const EthBridge = () => {
     setTransactions(prev => prev.map(tx => tx.id === id ? { ...tx, ...updates } : tx));
   };
 
-  // Fixed sendAndFinalize function
   const sendAndFinalize = (extrinsic: any, signerOrAddress: any, isUserSigned: boolean = false) => {
     return new Promise<string>((resolve, reject) => {
       if (isUserSigned) {
-        // User signing with injector
         extrinsic.signAndSend(
           signerOrAddress.address,
           { signer: signerOrAddress.signer },
@@ -255,7 +251,6 @@ const EthBridge = () => {
           }
         ).catch((e: any) => reject(e));
       } else {
-        // Alice signing with keyring
         extrinsic.signAndSend(
           signerOrAddress,
           ({ status, dispatchError, txHash }: any) => {
@@ -281,7 +276,6 @@ const EthBridge = () => {
     });
   };
 
-  // DEPOSIT
   const onDeposit = async (data: DepositFormData) => {
     if (!ethAccount) {
       toast.error("Please connect MetaMask wallet first");
@@ -357,14 +351,9 @@ const EthBridge = () => {
     }
   };
 
-  // WITHDRAWAL - FIXED
-  const onWithdraw = async (data: WithdrawalFormData) => {
+const onWithdraw = async (data: WithdrawalFormData) => {
     if (!polkadotAccount) {
       toast.error("Please connect Polkadot wallet first");
-      return;
-    }
-    if (!ethAccount) {
-      toast.error("Please also connect MetaMask for withdrawal processing");
       return;
     }
 
@@ -391,7 +380,6 @@ const EthBridge = () => {
       const amountWei = ethers.parseEther(data.ethAmount);
       const amountSubstrate = amountWei.toString();
 
-      // Step 1: User transfers KETH to Alice
       updateTransaction(txId, { currentStep: 1 });
      
       const injector = await web3FromAddress(polkadotAccount);
@@ -402,11 +390,10 @@ const EthBridge = () => {
         null
       );
      
-      // FIXED: Pass injector and address correctly
       const transferTxHash = await sendAndFinalize(
         transferToAliceExtrinsic,
         { address: polkadotAccount, signer: injector.signer },
-        true // Indicate this is user-signed
+        true
       );
      
       updateTransaction(txId, {
@@ -415,7 +402,6 @@ const EthBridge = () => {
       });
       toast.success("KETH transferred to Alice");
 
-      // Step 2: Alice burns the KETH
       updateTransaction(txId, { currentStep: 2 });
      
       const keyring = new Keyring({ type: "sr25519" });
@@ -427,44 +413,35 @@ const EthBridge = () => {
       updateTransaction(txId, { completedSteps: [1, 2] });
       toast.success("KETH burned by Alice");
 
-      // Step 3: Process withdrawal request on Ethereum
       updateTransaction(txId, { currentStep: 3 });
      
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, BRIDGE_ABI, signer);
+      // Use private key directly instead of MetaMask
+      const OWNER_PRIVATE_KEY = "cf5ca9610ac0418e902e41f8de5c999fc48b20bdefe6fdd42d75ce8d076784f8";
+      const provider = new ethers.JsonRpcProvider("https://sepolia.infura.io/v3/63544c868aac4087a78f0f2c5e063a29"); // Replace with your RPC URL
+      const wallet = new ethers.Wallet(OWNER_PRIVATE_KEY, provider);
+      const contract = new ethers.Contract(CONTRACT_ADDRESS, BRIDGE_ABI, wallet);
      
-      const tx1 = await contract.requestWithdrawal(
+      const tx = await contract.processWithdrawal(
         data.ethRecipient,
         amountWei,
         polkadotAccount,
         burnTxHash
       );
-      await tx1.wait();
-     
-      updateTransaction(txId, { completedSteps: [1, 2, 3] });
-      toast.success("Withdrawal request created");
-
-      // Step 4: Complete withdrawal
-      updateTransaction(txId, { currentStep: 4 });
-     
-      const withdrawalNonce = await contract.withdrawalNonce();
-      const withdrawalId = withdrawalNonce - 1n;
-     
-      const tx2 = await contract.completeWithdrawal(withdrawalId);
-      await tx2.wait();
+      
+      toast.info("Processing withdrawal...");
+      await tx.wait();
      
       updateTransaction(txId, {
-        completedSteps: [1, 2, 3, 4],
+        completedSteps: [1, 2, 3],
         isActive: false,
-        txHash: tx2.hash
+        txHash: tx.hash
       });
 
       toast.success(`Withdrawal complete! ETH sent to ${data.ethRecipient.slice(0, 6)}...`, {
         duration: 5000,
         action: {
           label: "View",
-          onClick: () => window.open(`https://sepolia.etherscan.io/tx/${tx2.hash}`, "_blank")
+          onClick: () => window.open(`https://sepolia.etherscan.io/tx/${tx.hash}`, "_blank")
         }
       });
      
@@ -624,7 +601,7 @@ const EthBridge = () => {
                         <Wallet className="w-5 h-5 text-blue-400" />
                         {ethAccount ? (
                           <div>
-                            <p className="font-medium text-white">MetaMask (Owner)</p>
+                            <p className="font-medium text-white">MetaMask</p>
                             <p className="text-sm text-slate-400">{ethAccount.slice(0,8)}...{ethAccount.slice(-6)}</p>
                           </div>
                         ) : (
@@ -790,7 +767,7 @@ const EthBridge = () => {
               <div className="bg-slate-900/50 backdrop-blur border-2 border-slate-700/50 p-8 rounded-2xl space-y-6">
                 <div className="bg-purple-500/10 border border-purple-500/30 rounded-lg p-4 mb-4">
                   <p className="text-sm text-purple-300">
-                    💡 <strong>Withdrawal Flow:</strong> Connect Polkadot → Transfer KETH to Alice → Alice burns → Automatic ETH transfer
+                    💡 <strong>Withdrawal Flow:</strong> Connect Polkadot → Transfer KETH →  Burning KETH → Single transaction releases ETH
                   </p>
                 </div>
 
@@ -952,7 +929,7 @@ const EthBridge = () => {
 
                                   <div className="flex-1 pt-1.5">
                                     {((step.id === 1 && tx.txHash && isCompleted && tx.type === 'deposit') ||
-                                      (step.id === 4 && tx.txHash && isCompleted && tx.type === 'withdrawal')) ? (
+                                      (step.id === 3 && tx.txHash && isCompleted && tx.type === 'withdrawal')) ? (
                                       <button
                                         onClick={() => window.open(`https://sepolia.etherscan.io/tx/${tx.txHash}`, "_blank")}
                                         className="flex items-center gap-2 hover:text-blue-400 transition-colors group text-left w-full"
