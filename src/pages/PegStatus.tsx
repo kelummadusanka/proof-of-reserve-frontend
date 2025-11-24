@@ -180,7 +180,7 @@ const PegStatus = () => {
                 <p className="text-sm text-muted-foreground">Circulation Supply</p>
                 {/* ❗ This stays EXACTLY as you had it */}
                 <p className="text-3xl font-bold text-accent">
-                  ${circulation.toLocaleString()}
+                  ${circulation.toLocaleString()} KETH
                 </p>
               </div>
             </div>
