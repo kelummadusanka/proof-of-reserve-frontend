@@ -1,0 +1,1671 @@
+import { useState, useEffect } from "react";
+import { ApiPromise, WsProvider } from '@polkadot/api';
+import { web3Accounts, web3Enable, web3FromAddress } from '@polkadot/extension-dapp';
+import { Boxes, Plus, Zap, Sparkles, Check } from "lucide-react";
+
+// Components
+import { Header } from "../components/layout/Header";
+import { Sidebar } from "../components/layout/Sidebar";
+import { HeroSection } from "../components/sections/HeroSection";
+import { StatsSection } from "../components/sections/StatsSection";
+import { SearchSection } from "../components/sections/SearchSection";
+import { ListingsHeader } from "../components/sections/ListingsHeader";
+import { ListingsGrid } from "../components/sections/ListingsGrid";
+import { Notification } from "../components/common/Notification";
+import { LoadingSpinner } from "../components/common/LoadingSpinner";
+
+// Modals
+import { WalletModal } from "../components/modals/WalletModal";
+import { CreateListingModal } from "../components/modals/CreateListingModal";
+import { MakeOfferModal } from "../components/modals/MakeOfferModal";
+import { AddressBookModal } from "../components/modals/AddressBookModal";
+import { AddContactModal } from "../components/modals/AddContactModal";
+import { TransactionHistoryModal } from "../components/modals/TransactionHistoryModal";
+
+// Types
+import {
+  Listing,
+  Offer,
+  BlockchainState,
+  AddressBookEntry,
+  Transaction,
+  ViewMode,
+  Resource
+} from "../types";
+
+export default function BarterExchange() {
+  const [blockchain, setBlockchain] = useState<BlockchainState>({
+    api: null,
+    accounts: [],
+    selectedAccount: null,
+    connected: false,
+    loading: false
+  });
+
+  const [listings, setListings] = useState<Listing[]>([]);
+  const [allOffers, setAllOffers] = useState<Offer[]>([]);
+  const [myOffers, setMyOffers] = useState<Offer[]>([]);
+  const [showForm, setShowForm] = useState(false);
+  const [showWalletModal, setShowWalletModal] = useState(false);
+  const [notification, setNotification] = useState<{message: string, type: 'success' | 'error'} | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [balance, setBalance] = useState<string>('0');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [addressBook, setAddressBook] = useState<AddressBookEntry[]>([]);
+  const [showAddressBookModal, setShowAddressBookModal] = useState(false);
+  const [showAddContactModal, setShowAddContactModal] = useState(false);
+  const [showTransactionHistory, setShowTransactionHistory] = useState(false);
+  const [newContact, setNewContact] = useState({ name: '', address: '' });
+  const [editingContact, setEditingContact] = useState<number | null>(null);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [viewMode, setViewMode] = useState<ViewMode>('all');
+
+  const [formData, setFormData] = useState({
+    resourceType: '',
+    resourceId: '',
+    metadata: '',
+    desiredResources: [] as Array<{type: string, id: string, metadata: string}>,
+    isPrivate: false,
+    targetAccount: '',
+    useAddressBook: false,
+    selectedContact: ''
+  });
+
+  useEffect(() => {
+    initializeBlockchain();
+    loadAddressBook();
+    loadTransactions();
+  }, []);
+
+  useEffect(() => {
+    if (blockchain.api && blockchain.connected) {
+      loadListings();
+      loadAllOffers();
+      loadMyOffers();
+      subscribeToEvents();
+    }
+  }, [blockchain.api, blockchain.connected, blockchain.selectedAccount]);
+
+  useEffect(() => {
+    if (blockchain.api && blockchain.selectedAccount) {
+      loadBalance();
+    }
+  }, [blockchain.api, blockchain.selectedAccount]);
+
+  const formatBalance = (bal: string): string => {
+    const num = parseFloat(bal);
+    if (num >= 1000000) return `${(num / 1000000).toFixed(2)}M`;
+    if (num >= 1000) return `${(num / 1000).toFixed(2)}K`;
+    return num.toFixed(2);
+  };
+
+  const loadTransactions = () => {
+    const stored = localStorage.getItem('barterTransactions');
+    if (stored) {
+      setTransactions(JSON.parse(stored));
+    }
+  };
+
+  const saveTransaction = (tx: Transaction) => {
+    const updated = [tx, ...transactions].slice(0, 50);
+    localStorage.setItem('barterTransactions', JSON.stringify(updated));
+    setTransactions(updated);
+  };
+
+  const loadAddressBook = () => {
+    const stored = localStorage.getItem('barterAddressBook');
+    if (stored) {
+      setAddressBook(JSON.parse(stored));
+    }
+  };
+
+  const saveAddressBook = (book: AddressBookEntry[]) => {
+    localStorage.setItem('barterAddressBook', JSON.stringify(book));
+    setAddressBook(book);
+  };
+
+  const addContact = () => {
+    if (!newContact.name || !newContact.address) {
+      showNotification('Please fill in both name and address', 'error');
+      return;
+    }
+
+    const updated = [...addressBook, newContact];
+    saveAddressBook(updated);
+    setNewContact({ name: '', address: '' });
+    setShowAddContactModal(false);
+    showNotification('Contact added successfully', 'success');
+  };
+
+  const updateContact = (index: number) => {
+    if (!newContact.name || !newContact.address) {
+      showNotification('Please fill in both name and address', 'error');
+      return;
+    }
+
+    const updated = [...addressBook];
+    updated[index] = newContact;
+    saveAddressBook(updated);
+    setNewContact({ name: '', address: '' });
+    setEditingContact(null);
+    showNotification('Contact updated successfully', 'success');
+  };
+
+  const deleteContact = (index: number) => {
+    const updated = addressBook.filter((_, i) => i !== index);
+    saveAddressBook(updated);
+    showNotification('Contact deleted', 'success');
+  };
+
+  const loadBalance = async () => {
+    if (!blockchain.api || !blockchain.selectedAccount) return;
+
+    try {
+      const account = await blockchain.api.query.system.account(blockchain.selectedAccount.address);
+      const free = account.data.free.toString();
+      const formatted = (parseInt(free) / 1e12).toFixed(4);
+      setBalance(formatted);
+    } catch (error) {
+      console.error('Error loading balance:', error);
+    }
+  };
+
+  const initializeBlockchain = async () => {
+    try {
+      setBlockchain(prev => ({ ...prev, loading: true }));
+
+      const wsUrl = 'wss://polkadev.publicvm.com:9443';
+      console.log('Connecting to Substrate node:', wsUrl);
+      const wsProvider = new WsProvider(wsUrl);
+      const api = await ApiPromise.create({ provider: wsProvider });
+
+      await api.isReady;
+      console.log('✅ Connected successfully!');
+
+      setBlockchain(prev => ({ 
+        ...prev, 
+        api, 
+        connected: true, 
+        loading: false 
+      }));
+
+      showNotification('🚀 Connected to blockchain', 'success');
+    } catch (error) {
+      console.error('Blockchain connection error:', error);
+      showNotification('Failed to connect to blockchain', 'error');
+      setBlockchain(prev => ({ ...prev, loading: false }));
+    }
+  };
+
+  const connectWallet = async () => {
+    try {
+      const extensions = await web3Enable('Barter Exchange');
+      
+      if (extensions.length === 0) {
+        showNotification('Please install Polkadot.js extension', 'error');
+        window.open('https://polkadot.js.org/extension/', '_blank');
+        return;
+      }
+
+      const allAccounts = await web3Accounts();
+      
+      if (allAccounts.length === 0) {
+        showNotification('No accounts found in wallet', 'error');
+        return;
+      }
+
+      setBlockchain(prev => ({ 
+        ...prev, 
+        accounts: allAccounts,
+        selectedAccount: allAccounts[0]
+      }));
+
+      setShowWalletModal(false);
+      showNotification('✅ Wallet connected successfully', 'success');
+      
+      if (blockchain.api) {
+        loadMyOffers();
+        loadBalance();
+      }
+    } catch (error) {
+      console.error('Wallet connection error:', error);
+      showNotification('Failed to connect wallet', 'error');
+    }
+  };
+
+  const loadListings = async () => {
+    if (!blockchain.api) return;
+
+    try {
+      setRefreshing(true);
+      const nextId = await blockchain.api.query.template.nextListingId();
+      const listingCount = nextId.toNumber();
+      
+      const loadedListings: Listing[] = [];
+
+      for (let i = 0; i < listingCount; i++) {
+        const listing = await blockchain.api.query.template.listings(i);
+        
+        if (listing.isSome) {
+          const listingData = listing.unwrap();
+          const status = listingData.status.toString();
+          
+          const desiredResources = listingData.desiredResources.map((r: any) => ({
+            resourceType: new TextDecoder().decode(r.resourceType),
+            resourceId: new TextDecoder().decode(r.resourceId),
+            metadata: new TextDecoder().decode(r.metadata)
+          }));
+
+          loadedListings.push({
+            id: i.toString(),
+            owner: listingData.owner.toString(),
+            offeredResource: {
+              resourceType: new TextDecoder().decode(listingData.offeredResource.resourceType),
+              resourceId: new TextDecoder().decode(listingData.offeredResource.resourceId),
+              metadata: new TextDecoder().decode(listingData.offeredResource.metadata)
+            },
+            desiredResources,
+            status,
+            deposit: listingData.deposit.toString(),
+            createdAt: listingData.createdAt.toNumber(),
+            targetAccount: listingData.targetAccount.isSome ? listingData.targetAccount.unwrap().toString() : null
+          });
+        }
+      }
+
+      setListings(loadedListings);
+    } catch (error) {
+      console.error('Error loading listings:', error);
+      showNotification('Failed to load listings', 'error');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const loadAllOffers = async () => {
+    if (!blockchain.api) return;
+
+    try {
+      const nextId = await blockchain.api.query.template.nextOfferId();
+      const offerCount = nextId.toNumber();
+      
+      const loadedOffers: Offer[] = [];
+
+      for (let i = 0; i < offerCount; i++) {
+        const offer = await blockchain.api.query.template.offers(i);
+        
+        if (offer.isSome) {
+          const offerData = offer.unwrap();
+          
+          loadedOffers.push({
+            id: i.toString(),
+            listingId: offerData.listingId.toString(),
+            offerer: offerData.offerer.toString(),
+            offeredResources: offerData.offeredResources.map((r: any) => ({
+              resourceType: new TextDecoder().decode(r.resourceType),
+              resourceId: new TextDecoder().decode(r.resourceId),
+              metadata: new TextDecoder().decode(r.metadata)
+            })),
+            status: offerData.status.toString(),
+            deposit: offerData.deposit.toString(),
+            createdAt: offerData.createdAt.toNumber()
+          });
+        }
+      }
+      
+      setAllOffers(loadedOffers);
+    } catch (error) {
+      console.error('Error loading all offers:', error);
+    }
+  };
+
+  const loadMyOffers = async () => {
+    if (!blockchain.api || !blockchain.selectedAccount) return;
+
+    try {
+      const offerIds = await blockchain.api.query.template.offersByOfferer(
+        blockchain.selectedAccount.address
+      );
+      
+      const loadedOffers: Offer[] = [];
+      
+      for (const offerId of offerIds) {
+        const offer = await blockchain.api.query.template.offers(offerId.toNumber());
+        
+        if (offer.isSome) {
+          const offerData = offer.unwrap();
+          
+          loadedOffers.push({
+            id: offerId.toString(),
+            listingId: offerData.listingId.toString(),
+            offerer: offerData.offerer.toString(),
+            offeredResources: offerData.offeredResources.map((r: any) => ({
+              resourceType: new TextDecoder().decode(r.resourceType),
+              resourceId: new TextDecoder().decode(r.resourceId),
+              metadata: new TextDecoder().decode(r.metadata)
+            })),
+            status: offerData.status.toString(),
+            deposit: offerData.deposit.toString(),
+            createdAt: offerData.createdAt.toNumber()
+          });
+        }
+      }
+      
+      setMyOffers(loadedOffers);
+    } catch (error) {
+      console.error('Error loading offers:', error);
+    }
+  };
+
+  const subscribeToEvents = () => {
+    if (!blockchain.api) return;
+
+    blockchain.api.query.system.events((events: any) => {
+      events.forEach((record: any) => {
+        const { event } = record;
+        
+        if (event.section === 'template') {
+          if (event.method === 'ListingCreated' || event.method === 'PrivateListingCreated') {
+            const [listingId] = event.data;
+            saveTransaction({
+              type: 'Listing Created',
+              listingId: listingId.toString(),
+              timestamp: Date.now(),
+              status: 'success'
+            });
+            showNotification('🎉 Listing created successfully!', 'success');
+            loadListings();
+            loadBalance();
+          } else if (event.method === 'TradeCompleted') {
+            const [listingId, offerId] = event.data;
+            saveTransaction({
+              type: 'Trade Completed',
+              listingId: listingId.toString(),
+              offerId: offerId.toString(),
+              timestamp: Date.now(),
+              status: 'success'
+            });
+            showNotification('✨ Trade completed!', 'success');
+            loadListings();
+            loadMyOffers();
+            loadAllOffers();
+            loadBalance();
+          } else if (event.method === 'OfferMade') {
+            const [offerId, listingId] = event.data;
+            saveTransaction({
+              type: 'Offer Made',
+              listingId: listingId.toString(),
+              offerId: offerId.toString(),
+              timestamp: Date.now(),
+              status: 'success'
+            });
+            showNotification('💼 Offer submitted!', 'success');
+            loadMyOffers();
+            loadAllOffers();
+            loadBalance();
+          } else if (event.method === 'ListingCancelled') {
+            const [listingId] = event.data;
+            saveTransaction({
+              type: 'Listing Cancelled',
+              listingId: listingId.toString(),
+              timestamp: Date.now(),
+              status: 'cancelled'
+            });
+            showNotification('🚫 Listing cancelled', 'success');
+            loadListings();
+            loadBalance();
+          } else if (event.method === 'OfferCancelled') {
+            const [offerId] = event.data;
+            saveTransaction({
+              type: 'Offer Cancelled',
+              offerId: offerId.toString(),
+              timestamp: Date.now(),
+              status: 'cancelled'
+            });
+            showNotification('🚫 Offer cancelled', 'success');
+            loadMyOffers();
+            loadAllOffers();
+            loadBalance();
+          } else if (event.method === 'OfferRejected') {
+            const [offerId] = event.data;
+            saveTransaction({
+              type: 'Offer Rejected',
+              offerId: offerId.toString(),
+              timestamp: Date.now(),
+              status: 'rejected'
+            });
+            showNotification('❌ Offer rejected', 'error');
+            loadMyOffers();
+            loadAllOffers();
+            loadBalance();
+          }
+        }
+      });
+    });
+  };
+
+  const createListing = async () => {
+    if (!blockchain.api || !blockchain.selectedAccount) {
+      showNotification('Please connect your wallet first', 'error');
+      return;
+    }
+
+    if (!formData.resourceType || !formData.resourceId || !formData.metadata) {
+      showNotification('Please fill in all required fields', 'error');
+      return;
+    }
+
+    const MAX_LENGTH = 256;
+    
+    if (formData.resourceType.length > MAX_LENGTH || formData.resourceId.length > MAX_LENGTH || formData.metadata.length > MAX_LENGTH) {
+      showNotification(`Fields too long (max ${MAX_LENGTH} characters)`, 'error');
+      return;
+    }
+
+    if (formData.isPrivate) {
+      const targetAddr = formData.useAddressBook ? formData.selectedContact : formData.targetAccount;
+      if (!targetAddr) {
+        showNotification('Please specify target account', 'error');
+        return;
+      }
+      if (targetAddr === blockchain.selectedAccount.address) {
+        showNotification('Cannot target yourself', 'error');
+        return;
+      }
+    }
+
+    try {
+      const balance = await blockchain.api.query.system.account(blockchain.selectedAccount.address);
+      const deposit = blockchain.api.consts.template.listingDeposit;
+      
+      if (balance.data.free.lt(deposit.muln(2))) {
+        showNotification('Insufficient balance for deposit', 'error');
+        return;
+      }
+    } catch (error) {
+      console.error('Balance check error:', error);
+    }
+
+    try {
+      setBlockchain(prev => ({ ...prev, loading: true }));
+
+      const injector = await web3FromAddress(blockchain.selectedAccount.address);
+
+      const resourceType = formData.resourceType.trim();
+      const resourceId = formData.resourceId.trim();
+      const metadata = formData.metadata.trim();
+
+      let desiredResources = null;
+      
+      if (formData.desiredResources.length > 0) {
+        const validResources = formData.desiredResources.filter(r => 
+          r.type.trim() && r.id.trim() && r.metadata.trim()
+        );
+
+        if (validResources.length > 0) {
+          desiredResources = validResources.map(r => [
+            r.type.trim(),
+            r.id.trim(),
+            r.metadata.trim()
+          ]);
+        }
+      }
+
+      const targetAccount = formData.isPrivate 
+        ? (formData.useAddressBook ? formData.selectedContact : formData.targetAccount)
+        : null;
+
+      const unsub = await blockchain.api.tx.template
+        .createListing(resourceType, resourceId, metadata, desiredResources, targetAccount)
+        .signAndSend(
+          blockchain.selectedAccount.address,
+          { signer: injector.signer },
+          ({ status, dispatchError }) => {
+            if (dispatchError) {
+              let errorMsg = 'Transaction failed';
+              if (dispatchError.isModule) {
+                const decoded = blockchain.api!.registry.findMetaError(dispatchError.asModule);
+                errorMsg = `${decoded.section}.${decoded.name}`;
+              }
+              showNotification(`Error: ${errorMsg}`, 'error');
+              setBlockchain(prev => ({ ...prev, loading: false }));
+            } else if (status.isInBlock) {
+              showNotification('✨ Listing created!', 'success');
+              setShowForm(false);
+              setFormData({
+                resourceType: '',
+                resourceId: '',
+                metadata: '',
+                desiredResources: [],
+                isPrivate: false,
+                targetAccount: '',
+                useAddressBook: false,
+                selectedContact: ''
+              });
+            } else if (status.isFinalized) {
+              unsub();
+              setBlockchain(prev => ({ ...prev, loading: false }));
+            }
+          }
+        );
+    } catch (error: any) {
+      console.error('Error:', error);
+      showNotification(`Failed: ${error.message || error}`, 'error');
+      setBlockchain(prev => ({ ...prev, loading: false }));
+    }
+  };
+
+  const [showOfferModal, setShowOfferModal] = useState(false);
+  const [selectedListingId, setSelectedListingId] = useState<string | null>(null);
+  const [offerData, setOfferData] = useState({
+    resources: [{ type: '', id: '', metadata: '' }]
+  });
+
+  const openOfferModal = (listingId: string) => {
+    setSelectedListingId(listingId);
+    setOfferData({ resources: [{ type: '', id: '', metadata: '' }] });
+    setShowOfferModal(true);
+  };
+
+  const addOfferResource = () => {
+    if (offerData.resources.length >= 10) {
+      showNotification('Maximum 10 resources allowed', 'error');
+      return;
+    }
+    setOfferData(prev => ({
+      resources: [...prev.resources, { type: '', id: '', metadata: '' }]
+    }));
+  };
+
+  const removeOfferResource = (index: number) => {
+    setOfferData(prev => ({
+      resources: prev.resources.filter((_, i) => i !== index)
+    }));
+  };
+
+  const makeOffer = async () => {
+    if (!blockchain.api || !blockchain.selectedAccount || !selectedListingId) {
+      showNotification('Please connect wallet first', 'error');
+      return;
+    }
+
+    const hasEmptyFields = offerData.resources.some(r => !r.type || !r.id || !r.metadata);
+    if (hasEmptyFields) {
+      showNotification('Fill all fields', 'error');
+      return;
+    }
+
+    try {
+      setBlockchain(prev => ({ ...prev, loading: true }));
+      const injector = await web3FromAddress(blockchain.selectedAccount.address);
+
+      const listingIdNum = Number(selectedListingId);
+      const offeredResources = offerData.resources.map(r => [
+        r.type.trim(),
+        r.id.trim(),
+        r.metadata.trim()
+      ]);
+
+      const unsub = await blockchain.api.tx.template
+        .makeOffer(listingIdNum, offeredResources)
+        .signAndSend(
+          blockchain.selectedAccount.address,
+          { signer: injector.signer },
+          ({ status, dispatchError }) => {
+            if (dispatchError) {
+              showNotification('Transaction failed', 'error');
+              setBlockchain(prev => ({ ...prev, loading: false }));
+            } else if (status.isInBlock) {
+              showNotification('💼 Offer submitted!', 'success');
+              setShowOfferModal(false);
+              setOfferData({ resources: [{ type: '', id: '', metadata: '' }] });
+            } else if (status.isFinalized) {
+              unsub();
+              setBlockchain(prev => ({ ...prev, loading: false }));
+            }
+          }
+        );
+    } catch (error: any) {
+      showNotification(`Failed: ${error.message}`, 'error');
+      setBlockchain(prev => ({ ...prev, loading: false }));
+    }
+  };
+
+  const cancelListing = async (listingId: string) => {
+    if (!blockchain.api || !blockchain.selectedAccount) return;
+
+    try {
+      setBlockchain(prev => ({ ...prev, loading: true }));
+      const injector = await web3FromAddress(blockchain.selectedAccount.address);
+
+      await blockchain.api.tx.template
+        .cancelListing(Number(listingId))
+        .signAndSend(blockchain.selectedAccount.address, { signer: injector.signer });
+
+      showNotification('Listing cancelled', 'success');
+    } catch (error: any) {
+      showNotification(`Failed: ${error.message}`, 'error');
+    } finally {
+      setBlockchain(prev => ({ ...prev, loading: false }));
+    }
+  };
+
+  const showNotification = (message: string, type: 'success' | 'error') => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 5000);
+  };
+
+  const addDesiredResource = () => {
+    if (formData.desiredResources.length >= 10) {
+      showNotification('Maximum 10 resources', 'error');
+      return;
+    }
+    setFormData(prev => ({
+      ...prev,
+      desiredResources: [...prev.desiredResources, { type: '', id: '', metadata: '' }]
+    }));
+  };
+
+  const removeDesiredResource = (index: number) => {
+    setFormData(prev => ({
+      ...prev,
+      desiredResources: prev.desiredResources.filter((_, i) => i !== index)
+    }));
+  };
+
+  const canMakeOffer = (listing: Listing) => {
+    if (!blockchain.selectedAccount) return false;
+    if (listing.owner === blockchain.selectedAccount.address) return false;
+    if (listing.targetAccount && listing.targetAccount !== blockchain.selectedAccount.address) return false;
+    return true;
+  };
+
+  const getFilteredListings = () => {
+    let filtered = listings;
+
+    if (viewMode === 'myListings') {
+      filtered = listings.filter(l => l.owner === blockchain.selectedAccount?.address);
+    } else if (viewMode === 'myOffers') {
+      const myOfferListingIds = myOffers.map(o => o.listingId);
+      filtered = listings.filter(l => myOfferListingIds.includes(l.id));
+    } else if (viewMode === 'completed') {
+      filtered = listings.filter(l => l.status === 'Completed');
+    } else {
+      filtered = listings.filter(l => l.status === 'Active' && canMakeOffer(l));
+    }
+
+    if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
+      filtered = filtered.filter(listing => 
+        listing.offeredResource.resourceType.toLowerCase().includes(searchLower) ||
+        listing.offeredResource.resourceId.toLowerCase().includes(searchLower) ||
+        listing.owner.toLowerCase().includes(searchLower)
+      );
+    }
+
+    return filtered;
+  };
+
+  const completedCount = listings.filter(l => l.status === 'Completed').length;
+
+  const stats = [
+    { 
+      label: "Available", 
+      value: listings.filter(l => l.status === 'Active' && canMakeOffer(l)).length, 
+      icon: Boxes,
+      gradient: "from-blue-500 to-cyan-500",
+      mode: 'all' as ViewMode
+    },
+    { 
+      label: "My Offers", 
+      value: myOffers.filter(o => o.status === 'Pending').length, 
+      icon: Zap,
+      gradient: "from-green-500 to-emerald-500",
+      mode: 'myOffers' as ViewMode
+    },
+    { 
+      label: "My Listings", 
+      value: listings.filter(l => l.owner === blockchain.selectedAccount?.address).length, 
+      icon: Sparkles,
+      gradient: "from-yellow-500 to-orange-500",
+      mode: 'myListings' as ViewMode
+    },
+    { 
+      label: "Completed", 
+      value: completedCount, 
+      icon: Check,
+      gradient: "from-purple-500 to-pink-500",
+      mode: 'completed' as ViewMode
+    },
+  ];
+
+  const getThemeForMode = (mode: ViewMode) => {
+    switch(mode) {
+      case 'all': return { border: 'border-blue-500/50', bg: 'from-blue-500/10 to-cyan-500/10', text: 'text-blue-400' };
+      case 'myOffers': return { border: 'border-green-500/50', bg: 'from-green-500/10 to-emerald-500/10', text: 'text-green-400' };
+      case 'myListings': return { border: 'border-yellow-500/50', bg: 'from-yellow-500/10 to-orange-500/10', text: 'text-yellow-400' };
+      case 'completed': return { border: 'border-purple-500/50', bg: 'from-purple-500/10 to-pink-500/10', text: 'text-purple-400' };
+    }
+  };
+
+  const currentTheme = getThemeForMode(viewMode);
+
+  return (
+    <div className="min-h-screen bg-slate-950 relative overflow-hidden">
+      {/* Animated background */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-0 left-1/4 w-96 h-96 bg-purple-500/20 rounded-full blur-3xl animate-pulse"></div>
+        <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-cyan-500/20 rounded-full blur-3xl animate-pulse" style={{animationDelay: '1s'}}></div>
+      </div>
+
+      {/* Right Sidebar */}
+      <div className={`fixed right-0 top-0 h-full w-96 bg-slate-900/95 backdrop-blur-xl border-l border-white/10 z-50 transform transition-transform duration-300 ${sidebarOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+        <div className="p-6 border-b border-white/10">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-bold text-white">Menu</h2>
+            <button onClick={() => setSidebarOpen(false)} className="p-2 hover:bg-white/10 rounded-lg">
+              <X className="w-5 h-5 text-gray-400" />
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-4 overflow-y-auto h-[calc(100%-100px)]">
+          <button
+            onClick={() => {
+              setShowAddressBookModal(true);
+              setSidebarOpen(false);
+            }}
+            className="w-full flex items-center gap-3 p-4 bg-gradient-to-r from-purple-600/20 to-pink-600/20 border border-purple-500/30 rounded-xl hover:border-purple-500 transition"
+          >
+            <BookOpen className="w-5 h-5 text-purple-400" />
+            <div className="flex-1 text-left">
+              <p className="text-white font-semibold">Address Book</p>
+              <p className="text-xs text-gray-400">{addressBook.length} contacts</p>
+            </div>
+            <ChevronRight className="w-4 h-4 text-gray-400" />
+          </button>
+
+          <button
+            onClick={() => {
+              setShowTransactionHistory(true);
+              setSidebarOpen(false);
+            }}
+            className="w-full flex items-center gap-3 p-4 bg-gradient-to-r from-cyan-600/20 to-blue-600/20 border border-cyan-500/30 rounded-xl hover:border-cyan-500 transition"
+          >
+            <History className="w-5 h-5 text-cyan-400" />
+            <div className="flex-1 text-left">
+              <p className="text-white font-semibold">Transaction History</p>
+              <p className="text-xs text-gray-400">{transactions.length} transactions</p>
+            </div>
+            <ChevronRight className="w-4 h-4 text-gray-400" />
+          </button>
+
+          <div className="mt-6">
+            <h3 className="text-xs text-gray-500 font-bold uppercase mb-3">Recent Offers</h3>
+            <div className="space-y-2 max-h-60 overflow-y-auto">
+              {allOffers.slice(0, 5).map(offer => (
+                <div key={offer.id} className="p-3 bg-slate-800/50 rounded-xl border border-purple-500/20">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-purple-400 font-bold">Offer #{offer.id}</span>
+                    <span className={`text-xs px-2 py-1 rounded-full ${
+                      offer.status === 'Pending' ? 'bg-yellow-500/20 text-yellow-300' :
+                      offer.status === 'Accepted' ? 'bg-green-500/20 text-green-300' :
+                      'bg-gray-500/20 text-gray-300'
+                    }`}>
+                      {offer.status}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    Listing #{offer.listingId} • {offer.offeredResources.length} item(s)
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Transaction History Modal */}
+      {showTransactionHistory && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-3xl p-8 max-w-3xl w-full border border-cyan-500/30 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-4">
+                <div className="p-3 rounded-2xl bg-gradient-to-br from-cyan-600 to-blue-600">
+                  <History className="w-6 h-6 text-white" />
+                </div>
+                <h3 className="text-3xl font-bold text-white">Transaction History</h3>
+              </div>
+              <button onClick={() => setShowTransactionHistory(false)} className="p-2 hover:bg-white/10 rounded-lg">
+                <X className="w-6 h-6 text-gray-400" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {transactions.length === 0 ? (
+                <div className="text-center py-12">
+                  <History className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                  <p className="text-gray-400">No transactions yet</p>
+                </div>
+              ) : (
+                transactions.map((tx, index) => (
+                  <div key={index} className="p-5 bg-slate-800/50 rounded-2xl border border-cyan-500/20">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-white font-bold">{tx.type}</span>
+                      <span className={`text-xs px-2 py-1 rounded-full ${
+                        tx.status === 'success' ? 'bg-green-500/20 text-green-300' :
+                        tx.status === 'cancelled' ? 'bg-yellow-500/20 text-yellow-300' :
+                        'bg-red-500/20 text-red-300'
+                      }`}>
+                        {tx.status}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-gray-400">
+                        {tx.listingId && `Listing #${tx.listingId}`}
+                        {tx.offerId && ` • Offer #${tx.offerId}`}
+                      </span>
+                      <span className="text-gray-500 text-xs">
+                        {new Date(tx.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Address Book Modal */}
+      {showAddressBookModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-3xl p-8 max-w-3xl w-full border border-purple-500/30 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-4">
+                <div className="p-3 rounded-2xl bg-gradient-to-br from-purple-600 to-pink-600">
+                  <BookOpen className="w-6 h-6 text-white" />
+                </div>
+                <h3 className="text-3xl font-bold text-white">Address Book</h3>
+              </div>
+              <button onClick={() => setShowAddressBookModal(false)} className="p-2 hover:bg-white/10 rounded-lg">
+                <X className="w-6 h-6 text-gray-400" />
+              </button>
+            </div>
+
+            <button
+              onClick={() => {
+                setShowAddContactModal(true);
+                setShowAddressBookModal(false);
+              }}
+              className="w-full mb-6 bg-gradient-to-r from-purple-600 to-pink-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2"
+            >
+              <UserPlus className="w-5 h-5" />
+              Add New Contact
+            </button>
+
+            <div className="space-y-3">
+              {addressBook.length === 0 ? (
+                <div className="text-center py-12">
+                  <Users className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                  <p className="text-gray-400">No contacts yet</p>
+                </div>
+              ) : (
+                addressBook.map((contact, index) => (
+                  <div key={index} className="p-5 bg-slate-800/50 rounded-2xl border border-purple-500/20 flex items-center justify-between">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-white font-bold text-lg">{contact.name}</p>
+                      <p className="text-gray-400 text-sm font-mono truncate">{contact.address}</p>
+                    </div>
+                    <div className="flex items-center gap-2 ml-4">
+                      <button
+                        onClick={() => {
+                          setNewContact(contact);
+                          setEditingContact(index);
+                          setShowAddContactModal(true);
+                          setShowAddressBookModal(false);
+                        }}
+                        className="p-2 bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded-lg"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => deleteContact(index)}
+                        className="p-2 bg-red-500/20 text-red-400 hover:bg-red-500/30 rounded-lg"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add/Edit Contact Modal */}
+      {showAddContactModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-3xl p-8 max-w-lg w-full border border-purple-500/30 shadow-2xl">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-2xl font-bold text-white">
+                {editingContact !== null ? 'Edit Contact' : 'Add Contact'}
+              </h3>
+              <button 
+                onClick={() => {
+                  setShowAddContactModal(false);
+                  setNewContact({ name: '', address: '' });
+                  setEditingContact(null);
+                }} 
+                className="p-2 hover:bg-white/10 rounded-lg"
+              >
+                <X className="w-6 h-6 text-gray-400" />
+              </button>
+            </div>
+
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-sm font-bold text-gray-300 mb-2">Name</label>
+                <input
+                  type="text"
+                  value={newContact.name}
+                  onChange={(e) => setNewContact(prev => ({ ...prev, name: e.target.value }))}
+                  className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white focus:outline-none focus:border-purple-500"
+                  placeholder="Alice, Bob, etc."
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-gray-300 mb-2">Address</label>
+                <input
+                  type="text"
+                  value={newContact.address}
+                  onChange={(e) => setNewContact(prev => ({ ...prev, address: e.target.value }))}
+                  className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white font-mono text-sm focus:outline-none focus:border-purple-500"
+                  placeholder="5D..."
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={() => {
+                if (editingContact !== null) {
+                  updateContact(editingContact);
+                } else {
+                  addContact();
+                }
+                setShowAddContactModal(false);
+              }}
+              className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white py-4 rounded-2xl font-bold"
+            >
+              {editingContact !== null ? 'Update' : 'Add'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Notification */}
+      {notification && (
+        <div className={`fixed top-6 right-6 z-50 px-6 py-4 rounded-2xl shadow-2xl backdrop-blur-xl border ${
+          notification.type === 'success' 
+            ? 'bg-green-500/20 border-green-500/50 text-green-100' 
+            : 'bg-red-500/20 border-red-500/50 text-red-100'
+        } animate-[slide-in_0.3s_ease-out]`}>
+          <div className="flex items-center gap-3">
+            {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+            <span className="font-medium">{notification.message}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Offer Modal */}
+      {showOfferModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-3xl p-8 max-w-2xl w-full border border-purple-500/30 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-8">
+              <div className="flex items-center gap-4">
+                <div className="p-3 rounded-2xl bg-gradient-to-br from-purple-600 to-pink-600">
+                  <Sparkles className="w-6 h-6 text-white" />
+                </div>
+                <h3 className="text-3xl font-bold text-white">Make Offer</h3>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowOfferModal(false);
+                  setOfferData({ resources: [{ type: '', id: '', metadata: '' }] });
+                }} 
+                className="p-2 hover:bg-white/10 rounded-lg"
+              >
+                <X className="w-6 h-6 text-gray-400" />
+              </button>
+            </div>
+
+            <div className="mb-6">
+              <p className="text-gray-300">Listing ID: <span className="text-purple-400 font-bold">#{selectedListingId}</span></p>
+            </div>
+
+            <div className="space-y-4 mb-6">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-bold text-gray-300 uppercase">Your Resources</label>
+                <button
+                  onClick={addOfferResource}
+                  disabled={offerData.resources.length >= 10}
+                  className="text-sm font-bold flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 disabled:opacity-50"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add
+                </button>
+              </div>
+
+              {offerData.resources.map((resource, index) => (
+                <div key={index} className="p-5 bg-slate-800/50 rounded-2xl border border-purple-500/20">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-sm text-purple-400 font-bold">Resource {index + 1}</span>
+                    {offerData.resources.length > 1 && (
+                      <button
+                        onClick={() => removeOfferResource(index)}
+                        className="text-red-400 p-2 hover:bg-red-500/10 rounded-lg"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    <input
+                      type="text"
+                      value={resource.type}
+                      onChange={(e) => {
+                        const newResources = [...offerData.resources];
+                        newResources[index].type = e.target.value;
+                        setOfferData({ resources: newResources });
+                      }}
+                      maxLength={256}
+                      className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white text-sm focus:outline-none focus:border-purple-500"
+                      placeholder="Type"
+                    />
+                    <input
+                      type="text"
+                      value={resource.id}
+                      onChange={(e) => {
+                        const newResources = [...offerData.resources];
+                        newResources[index].id = e.target.value;
+                        setOfferData({ resources: newResources });
+                      }}
+                      maxLength={256}
+                      className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white text-sm focus:outline-none focus:border-purple-500"
+                      placeholder="ID"
+                    />
+                    <input
+                      type="text"
+                      value={resource.metadata}
+                      onChange={(e) => {
+                        const newResources = [...offerData.resources];
+                        newResources[index].metadata = e.target.value;
+                        setOfferData({ resources: newResources });
+                      }}
+                      maxLength={256}
+                      className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white text-sm focus:outline-none focus:border-purple-500"
+                      placeholder="Description"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={makeOffer}
+              disabled={blockchain.loading}
+              className="w-full bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 text-white py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 disabled:opacity-50"
+            >
+              {blockchain.loading ? (
+                <>
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  Submitting...
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-5 h-5" />
+                  Submit Offer
+                  <ArrowRight className="w-5 h-5" />
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Wallet Modal */}
+      {showWalletModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-3xl p-8 max-w-md w-full border border-purple-500/30 shadow-2xl">
+            <div className="flex items-center justify-between mb-8">
+              <h3 className="text-3xl font-bold text-white">Connect Wallet</h3>
+              <button onClick={() => setShowWalletModal(false)} className="p-2 hover:bg-white/10 rounded-lg">
+                <X className="w-6 h-6 text-gray-400" />
+              </button>
+            </div>
+            
+            <button
+              onClick={connectWallet}
+              className="w-full bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 text-white py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3"
+            >
+              <Wallet className="w-6 h-6" />
+              Connect Polkadot.js
+              <ArrowRight className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <header className="sticky top-0 z-40 bg-slate-950/80 backdrop-blur-xl border-b border-white/10">
+        <div className="container mx-auto px-6 py-5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <div className="absolute inset-0 bg-gradient-to-r from-purple-600 to-pink-600 rounded-2xl blur opacity-75 animate-pulse"></div>
+                <div className="relative p-4 rounded-2xl bg-gradient-to-br from-purple-600 to-pink-600">
+                  <Boxes className="w-7 h-7 text-white" />
+                </div>
+              </div>
+              <div>
+                <h1 className="text-2xl font-black text-white">
+                  Barter<span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-pink-400 to-cyan-400">SWAP</span>
+                </h1>
+                <p className="text-xs text-gray-400 font-medium">Web3 P2P Trading Protocol</p>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-4">
+              {blockchain.connected && (
+                <div className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-green-500/20 to-emerald-500/20 border border-green-500/30">
+                  <span className="relative flex h-3 w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                  </span>
+                  <span className="text-sm text-green-100 font-semibold">Live</span>
+                </div>
+              )}
+
+              {blockchain.selectedAccount && (
+                <div className="flex items-center gap-3">
+                  <div className="px-5 py-2.5 rounded-full bg-gradient-to-r from-green-600 to-emerald-600 text-white text-sm font-bold flex items-center gap-2">
+                    <Wallet className="w-4 h-4" />
+                    {formatBalance(balance)} UNIT
+                  </div>
+                  <div className="px-5 py-2.5 rounded-full bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 text-white text-sm font-bold">
+                    {blockchain.selectedAccount.address.slice(0, 6)}•••{blockchain.selectedAccount.address.slice(-4)}
+                  </div>
+                </div>
+              )}
+
+              {!blockchain.selectedAccount && (
+                <button
+                  onClick={() => setShowWalletModal(true)}
+                  className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-6 py-2.5 rounded-full hover:shadow-lg font-bold flex items-center gap-2"
+                >
+                  <Wallet className="w-4 h-4" />
+                  Connect
+                </button>
+              )}
+
+              <button
+                onClick={() => setShowForm(!showForm)}
+                className={`${showForm 
+                  ? "bg-gradient-to-r from-slate-700 to-slate-600" 
+                  : "bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600"
+                } text-white px-6 py-2.5 rounded-full font-bold flex items-center gap-2`}
+                disabled={!blockchain.selectedAccount}
+              >
+                {showForm ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                {showForm ? "Cancel" : "Create"}
+              </button>
+
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className="p-2 hover:bg-white/10 rounded-lg"
+              >
+                <Menu className="w-6 h-6 text-white" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="container mx-auto px-6 py-12 relative">
+        {!blockchain.connected ? (
+          <div className="text-center py-32">
+            <div className="relative inline-block mb-8">
+              <div className="absolute inset-0 bg-gradient-to-r from-purple-600 to-pink-600 rounded-full blur-2xl opacity-50 animate-pulse"></div>
+              <div className="relative inline-flex items-center justify-center p-8 rounded-full bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/30">
+                <div className="w-16 h-16 border-4 border-purple-400/30 border-t-purple-400 rounded-full animate-spin"></div>
+              </div>
+            </div>
+            <h3 className="text-4xl font-black text-white mb-4">Connecting to Substrate...</h3>
+            <p className="text-xl text-gray-400">Initializing blockchain connection</p>
+          </div>
+        ) : showForm ? (
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-gradient-to-br from-slate-900/90 to-slate-800/90 rounded-3xl p-10 border border-purple-500/30 shadow-2xl backdrop-blur-xl">
+              <div className="flex items-center gap-4 mb-8">
+                <div className="p-3 rounded-2xl bg-gradient-to-br from-purple-600 to-pink-600">
+                  <Sparkles className="w-6 h-6 text-white" />
+                </div>
+                <h2 className="text-3xl font-black text-white">Create New Listing</h2>
+              </div>
+              
+              <div className="space-y-6">
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <label className="text-sm font-bold text-gray-300 uppercase">Resource Type *</label>
+                    <span className="text-xs font-semibold text-gray-500">{formData.resourceType.length}/256</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={formData.resourceType}
+                    onChange={(e) => setFormData(prev => ({ ...prev, resourceType: e.target.value }))}
+                    maxLength={256}
+                    className="w-full px-5 py-4 bg-slate-800/50 border border-purple-500/30 rounded-2xl text-white focus:outline-none focus:border-purple-500"
+                    placeholder="NFT, GameItem, Token..."
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <label className="text-sm font-bold text-gray-300 uppercase">Resource ID *</label>
+                    <span className="text-xs font-semibold text-gray-500">{formData.resourceId.length}/256</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={formData.resourceId}
+                    onChange={(e) => setFormData(prev => ({ ...prev, resourceId: e.target.value }))}
+                    maxLength={256}
+                    className="w-full px-5 py-4 bg-slate-800/50 border border-purple-500/30 rounded-2xl text-white focus:outline-none focus:border-purple-500"
+                    placeholder="CryptoKitty#1234..."
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <label className="text-sm font-bold text-gray-300 uppercase">Description *</label>
+                    <span className="text-xs font-semibold text-gray-500">{formData.metadata.length}/256</span>
+                  </div>
+                  <textarea
+                    value={formData.metadata}
+                    onChange={(e) => setFormData(prev => ({ ...prev, metadata: e.target.value }))}
+                    maxLength={256}
+                    className="w-full px-5 py-4 bg-slate-800/50 border border-purple-500/30 rounded-2xl text-white focus:outline-none focus:border-purple-500 resize-none"
+                    placeholder="Rare collectible..."
+                    rows={4}
+                  />
+                </div>
+
+                <div className="p-5 bg-slate-800/30 rounded-2xl border border-cyan-500/20">
+                  <label className="flex items-center gap-3 cursor-pointer mb-4">
+                    <input
+                      type="checkbox"
+                      checked={formData.isPrivate}
+                      onChange={(e) => setFormData(prev => ({ ...prev, isPrivate: e.target.checked }))}
+                      className="w-5 h-5 rounded"
+                    />
+                    <div>
+                      <span className="text-sm font-bold text-cyan-300 uppercase">Private Listing</span>
+                      <p className="text-xs text-gray-400 mt-1">Only specific account can make offers</p>
+                    </div>
+                  </label>
+                  
+                  {formData.isPrivate && (
+                    <>
+                      <label className="flex items-center gap-3 cursor-pointer mb-3">
+                        <input
+                          type="checkbox"
+                          checked={formData.useAddressBook}
+                          onChange={(e) => setFormData(prev => ({ ...prev, useAddressBook: e.target.checked }))}
+                          className="w-4 h-4 rounded"
+                        />
+                        <span className="text-sm text-cyan-200">Use Address Book</span>
+                      </label>
+
+                      {formData.useAddressBook ? (
+                        <select
+                          value={formData.selectedContact}
+                          onChange={(e) => setFormData(prev => ({ ...prev, selectedContact: e.target.value }))}
+                          className="w-full px-4 py-3 bg-slate-700/50 border border-cyan-500/30 rounded-xl text-white text-sm focus:outline-none"
+                        >
+                          <option value="">Select contact...</option>
+                          {addressBook.map((contact, index) => (
+                            <option key={index} value={contact.address}>
+                              {contact.name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={formData.targetAccount}
+                          onChange={(e) => setFormData(prev => ({ ...prev, targetAccount: e.target.value }))}
+                          className="w-full px-4 py-3 bg-slate-700/50 border border-cyan-500/30 rounded-xl text-white text-sm focus:outline-none"
+                          placeholder="Target address (5D...)"
+                        />
+                      )}
+                    </>
+                  )}
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-4">
+                    <label className="text-sm font-bold text-gray-300 uppercase">Desired Resources (Optional)</label>
+                    <button
+                      onClick={addDesiredResource}
+                      disabled={formData.desiredResources.length >= 10}
+                      className="text-sm font-bold flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 disabled:opacity-50"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Add
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {formData.desiredResources.map((resource, index) => (
+                      <div key={index} className="p-5 bg-slate-800/50 rounded-2xl border border-purple-500/20">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-sm text-purple-400 font-bold">Item {index + 1}</span>
+                          <button
+                            onClick={() => removeDesiredResource(index)}
+                            className="text-red-400 p-2 hover:bg-red-500/10 rounded-lg"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="space-y-3">
+                          <input
+                            type="text"
+                            value={resource.type}
+                            onChange={(e) => {
+                              const newResources = [...formData.desiredResources];
+                              newResources[index].type = e.target.value;
+                              setFormData(prev => ({ ...prev, desiredResources: newResources }));
+                            }}
+                            maxLength={256}
+                            className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white text-sm focus:outline-none"
+                            placeholder="Type"
+                          />
+                          <input
+                            type="text"
+                            value={resource.id}
+                            onChange={(e) => {
+                              const newResources = [...formData.desiredResources];
+                              newResources[index].id = e.target.value;
+                              setFormData(prev => ({ ...prev, desiredResources: newResources }));
+                            }}
+                            maxLength={256}
+                            className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white text-sm focus:outline-none"
+                            placeholder="ID"
+                          />
+                          <input
+                            type="text"
+                            value={resource.metadata}
+                            onChange={(e) => {
+                              const newResources = [...formData.desiredResources];
+                              newResources[index].metadata = e.target.value;
+                              setFormData(prev => ({ ...prev, desiredResources: newResources }));
+                            }}
+                            maxLength={256}
+                            className="w-full px-4 py-3 bg-slate-700/50 border border-purple-500/20 rounded-xl text-white text-sm focus:outline-none"
+                            placeholder="Description"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={createListing}
+                  disabled={!formData.resourceType || !formData.resourceId || !formData.metadata || blockchain.loading}
+                  className="w-full bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 text-white py-5 rounded-2xl font-black text-lg flex items-center justify-center gap-3 disabled:opacity-50"
+                >
+                  {blockchain.loading ? (
+                    <>
+                      <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                      Creating...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-5 h-5" />
+                      Create Listing
+                      <ArrowRight className="w-5 h-5" />
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Hero */}
+            <div className="text-center mb-16">
+              <h2 className="text-6xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-purple-400 via-pink-400 to-cyan-400 mb-6">
+                Trade Digital Assets P2P
+              </h2>
+              <p className="text-xl text-gray-400 max-w-3xl mx-auto">
+                Decentralized barter marketplace on Substrate
+              </p>
+            </div>
+
+            {/* Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-16">
+              {stats.map((stat, index) => (
+                <button
+                  key={stat.label}
+                  onClick={() => setViewMode(stat.mode)}
+                  style={{ animationDelay: `${index * 100}ms` }}
+                  className={`bg-gradient-to-br from-slate-900/90 to-slate-800/90 rounded-3xl p-6 border ${
+                    viewMode === stat.mode ? `${currentTheme.border} shadow-xl` : 'border-white/10'
+                  } hover:border-purple-500/50 transition-all backdrop-blur-xl animate-[fade-in_0.5s_ease-out_forwards] opacity-0 group cursor-pointer`}
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <div className={`p-3 rounded-2xl bg-gradient-to-br ${stat.gradient} shadow-lg group-hover:scale-110 transition-transform ${
+                      viewMode === stat.mode ? 'scale-110' : ''
+                    }`}>
+                      <stat.icon className="w-5 h-5 text-white" />
+                    </div>
+                    <span className="text-xs text-gray-400 uppercase font-bold">
+                      {stat.label}
+                    </span>
+                  </div>
+                  <p className={`text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r ${stat.gradient}`}>
+                    {stat.value}
+                  </p>
+                </button>
+              ))}
+            </div>
+
+            {/* Search */}
+            <div className="mb-12">
+              <div className="max-w-2xl mx-auto flex gap-4">
+                <div className="relative flex-1">
+                  <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="Search listings..."
+                    className="w-full pl-14 pr-5 py-5 bg-slate-900/50 border border-purple-500/30 rounded-2xl text-white focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <button
+                  onClick={loadListings}
+                  disabled={refreshing}
+                  className="px-6 py-5 bg-slate-900/50 border border-purple-500/30 rounded-2xl text-white hover:border-purple-500 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* Listings Header */}
+            <div className="flex items-center justify-between mb-10">
+              <div className="flex items-center gap-4">
+                <div className={`p-3 rounded-2xl bg-gradient-to-br ${currentTheme.bg} border ${currentTheme.border}`}>
+                  <TrendingUp className={`w-6 h-6 ${currentTheme.text}`} />
+                </div>
+                <div>
+                  <h3 className="text-3xl font-black text-white">
+                    {viewMode === 'all' && 'Available Listings'}
+                    {viewMode === 'myListings' && 'My Listings'}
+                    {viewMode === 'myOffers' && 'My Offers'}
+                    {viewMode === 'completed' && 'Completed Trades'}
+                  </h3>
+                  <p className="text-sm text-gray-400">
+                    {getFilteredListings().length} {getFilteredListings().length === 1 ? 'item' : 'items'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Listings Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+              {getFilteredListings().map((listing, index) => (
+                <div
+                  key={listing.id}
+                  style={{ animationDelay: `${index * 100}ms` }}
+                  className={`group bg-gradient-to-br from-slate-900/90 to-slate-800/90 rounded-3xl p-6 border ${currentTheme.border} hover:shadow-2xl hover:shadow-purple-500/20 backdrop-blur-xl animate-[fade-in_0.5s_ease-out_forwards] opacity-0 hover:-translate-y-2 transition-all duration-500`}
+                >
+                  {/* Card Header */}
+                  <div className="flex items-center justify-between mb-6">
+                    <span className="text-xs text-gray-400 font-bold font-mono">ID: {listing.id}</span>
+                    <div className="flex items-center gap-2">
+                      {listing.targetAccount ? (
+                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center gap-1">
+                          <Lock className="w-3 h-3" />
+                          Private
+                        </span>
+                      ) : (
+                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-300 border border-green-500/30 flex items-center gap-1">
+                          <Unlock className="w-3 h-3" />
+                          Public
+                        </span>
+                      )}
+                      <span className={`px-4 py-1.5 rounded-full text-xs font-bold ${
+                        listing.status === 'Active' 
+                          ? 'bg-gradient-to-r from-green-500/20 to-emerald-500/20 text-green-300 border border-green-500/30' 
+                          : listing.status === 'Completed'
+                          ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/20 text-purple-300 border border-purple-500/30'
+                          : 'bg-gray-500/20 text-gray-400 border border-gray-500/30'
+                      }`}>
+                        {listing.status}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Offered Resource */}
+                  <div className={`mb-6 p-5 rounded-2xl bg-gradient-to-br ${currentTheme.bg} border ${currentTheme.border}`}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <Sparkles className={`w-4 h-4 ${currentTheme.text}`} />
+                      <p className={`text-xs ${currentTheme.text} font-bold uppercase`}>Offering</p>
+                    </div>
+                    <p className="text-white font-black text-xl mb-2 truncate">{listing.offeredResource.resourceType}</p>
+                    <p className="text-gray-300 font-semibold mb-1 truncate">{listing.offeredResource.resourceId}</p>
+                    <p className="text-xs text-gray-400 line-clamp-2">{listing.offeredResource.metadata}</p>
+                  </div>
+
+                  {/* Desired Resources */}
+                  {listing.desiredResources.length > 0 && (
+                    <div className="mb-6 p-5 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-blue-500/10 border border-cyan-500/20">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Zap className="w-4 h-4 text-cyan-400" />
+                        <p className="text-xs text-cyan-400 font-bold uppercase">Wants</p>
+                      </div>
+                      <div className="space-y-2">
+                        {listing.desiredResources.slice(0, 2).map((resource, idx) => (
+                          <div key={idx} className="flex items-center gap-2">
+                            <div className="w-1.5 h-1.5 rounded-full bg-cyan-400"></div>
+                            <p className="text-white text-sm font-semibold truncate">{resource.resourceType} - {resource.resourceId}</p>
+                          </div>
+                        ))}
+                        {listing.desiredResources.length > 2 && (
+                          <p className="text-xs text-gray-400">+{listing.desiredResources.length - 2} more</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Owner */}
+                  <div className="flex items-center gap-2 mb-6 p-3 rounded-xl bg-slate-800/50">
+                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
+                      <span className="text-white text-xs font-bold">{listing.owner.slice(0, 2)}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-gray-500">Owner</p>
+                      <p className="text-xs text-gray-300 font-mono truncate">{listing.owner.slice(0, 12)}...{listing.owner.slice(-8)}</p>
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  {viewMode !== 'completed' && listing.status === 'Active' && (
+                    <>
+                      {listing.owner === blockchain.selectedAccount?.address ? (
+                        <button
+                          onClick={() => cancelListing(listing.id)}
+                          disabled={blockchain.loading}
+                          className="w-full bg-gradient-to-r from-red-600 to-red-700 text-white py-4 rounded-2xl font-black text-sm hover:shadow-xl disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          <X className="w-4 h-4" />
+                          Cancel Listing
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => openOfferModal(listing.id)}
+                          disabled={!canMakeOffer(listing) || blockchain.loading}
+                          className="w-full bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 text-white py-4 rounded-2xl font-black text-sm hover:shadow-xl disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          <Sparkles className="w-4 h-4" />
+                          Make Offer
+                          <ArrowRight className="w-4 h-4" />
+                        </button>
+                      )}
+                    </>
+                  )}
+
+                  {viewMode === 'completed' && (
+                    <div className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white py-4 rounded-2xl font-black text-sm flex items-center justify-center gap-2">
+                      <Check className="w-4 h-4" />
+                      Trade Completed
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Empty State */}
+            {getFilteredListings().length === 0 && (
+              <div className="text-center py-32">
+                <Boxes className="w-20 h-20 text-purple-400 mx-auto mb-8 opacity-50" />
+                <h3 className="text-4xl font-black text-white mb-4">
+                  {searchTerm ? 'No Results' : 'No Items'}
+                </h3>
+                <p className="text-xl text-gray-400">
+                  {searchTerm ? 'Try different search terms' : 'No items in this category yet'}
+                </p>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+
+      <style>{`
+        @keyframes fade-in {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes slide-in {
+          from { opacity: 0; transform: translateX(100px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+      `}</style>
+    </div>
+  );
+}
