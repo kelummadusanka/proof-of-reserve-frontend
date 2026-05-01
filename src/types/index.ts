@@ -53,3 +53,27 @@ export interface Transaction {
 }
 
 export type ViewMode = 'all' | 'myListings' | 'myOffers' | 'completed';
+
+// Reputation types
+export interface ReputationScore {
+  accountId: string;
+  overallScore: number;
+  transactionComponent: number;
+  feedbackComponent: number;
+  disputeComponent: number;
+  reliabilityComponent: number;
+  successfulTransactions: number;
+  failedTransactions: number;
+  averageRating: number;
+  totalFeedback: number;
+}
+
+export interface UIReputationScore {
+  overallScore: number;
+  trustLevel: 'unproven' | 'risky' | 'neutral' | 'good' | 'excellent';
+  successfulTransactions: number;
+  failedTransactions: number;
+  reliability: number;
+  averageRating: number;
+  totalFeedback: number;
+}

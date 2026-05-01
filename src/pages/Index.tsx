@@ -14,6 +14,7 @@ import { ListingsGrid } from "../components/sections/ListingsGrid";
 import { MyOffersSection } from "../components/sections/MyOffersSection";
 import { Notification } from "../components/common/Notification";
 import { LoadingSpinner } from "../components/common/LoadingSpinner";
+import { ReputationCard } from "../components/cards/ReputationCard";
 
 // Modals
 import { WalletModal } from "../components/modals/WalletModal";
@@ -23,9 +24,26 @@ import { AddressBookModal } from "../components/modals/AddressBookModal";
 import { AddContactModal } from "../components/modals/AddContactModal";
 import { TransactionHistoryModal } from "../components/modals/TransactionHistoryModal";
 import { ViewOffersModal } from "../components/modals/ViewOffersModal";
+import { FeedbackModal } from "../components/modals/FeedbackModal";
+import { FeedbackHistoryModal } from "../components/modals/FeedbackHistoryModal";
+import { NotificationsPanel } from "../components/modals/NotificationsPanel";
+import { TrustScoreNavbar } from "../components/TrustScoreNavbar";
 
 // Config
 import { substrateConfig } from "../config/substrate.config";
+
+// Services
+import {
+  getReputationScore,
+  submitFeedback,
+  saveFeedback,
+  getFeedbackHistory,
+  savePendingFeedback,
+  getPendingFeedback,
+  markFeedbackAsSubmitted,
+  FeedbackItem,
+  PendingFeedback
+} from "../services/reputation.service";
 
 // Types
 import {
@@ -78,17 +96,29 @@ export default function BarterExchange() {
   const [viewMode, setViewMode] = useState<ViewMode>('all');
   const [searchTerm, setSearchTerm] = useState('');
 
+  // Feedback and Notifications States
+  const [showFeedbackHistory, setShowFeedbackHistory] = useState(false);
+  const [feedbackHistory, setFeedbackHistory] = useState<FeedbackItem[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [pendingFeedbacks, setPendingFeedbacks] = useState<PendingFeedback[]>([]);
+
   // Form States
   const [selectedListingId, setSelectedListingId] = useState<string | null>(null);
   const [newContact, setNewContact] = useState({ name: '', address: '' });
   const [editingContact, setEditingContact] = useState<number | null>(null);
   const [acceptedOfferId, setAcceptedOfferId] = useState<string | null>(null);
 
+  // Reputation and Feedback States
+  const [myReputation, setMyReputation] = useState<any>(null);
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [completedTrade, setCompletedTrade] = useState<{ offerer: string; listingId: string } | null>(null);
+
   // Initialize on mount
   useEffect(() => {
     initializeBlockchain();
     loadAddressBook();
     loadTransactions();
+    loadFeedbackData();
   }, []);
 
   // Load data when connected
@@ -165,6 +195,7 @@ export default function BarterExchange() {
       if (blockchain.api) {
         loadMyOffers();
         loadBalance();
+        loadMyReputation(allAccounts[0].address);
       }
     } catch (error) {
       console.error('Wallet connection error:', error);
@@ -182,6 +213,81 @@ export default function BarterExchange() {
       setBalance(formatted);
     } catch (error) {
       console.error('Error loading balance:', error);
+    }
+  };
+
+  const loadMyReputation = async (accountId: string) => {
+    if (!blockchain.api) return;
+
+    try {
+      const reputation = await getReputationScore(blockchain.api, accountId);
+      setMyReputation(reputation);
+    } catch (error) {
+      console.error('Error loading reputation:', error);
+    }
+  };
+
+  const loadFeedbackData = () => {
+    try {
+      const history = getFeedbackHistory();
+      const pending = getPendingFeedback();
+      setFeedbackHistory(history);
+      setPendingFeedbacks(pending);
+    } catch (error) {
+      console.error('Error loading feedback data:', error);
+    }
+  };
+
+  const submitFeedbackHandler = async (rating: number, feedback: string) => {
+    if (!blockchain.api || !blockchain.selectedAccount || !completedTrade) {
+      showNotification('Missing required data for feedback', 'error');
+      return;
+    }
+
+    try {
+      setBlockchain(prev => ({ ...prev, loading: true }));
+      await web3Enable('Barter Exchange');
+      const injector = await web3FromAddress(blockchain.selectedAccount.address);
+
+      const result = await submitFeedback(
+        blockchain.api,
+        injector.signer,
+        blockchain.selectedAccount.address,
+        completedTrade.offerer,
+        rating,
+        feedback
+      );
+
+      if (result.success) {
+        // Save feedback to history
+        const feedbackItem: FeedbackItem = {
+          id: `${blockchain.selectedAccount.address}-${completedTrade.offerer}-${Date.now()}`,
+          from: blockchain.selectedAccount.address,
+          to: completedTrade.offerer,
+          rating,
+          comment: feedback,
+          timestamp: Date.now(),
+          transactionId: completedTrade.listingId,
+          status: 'given'
+        };
+        saveFeedback(feedbackItem);
+        
+        // Update feedback history state
+        setFeedbackHistory(prev => [...prev, feedbackItem]);
+        
+        showNotification('✅ Feedback submitted!', 'success');
+        setShowFeedbackModal(false);
+        setCompletedTrade(null);
+        // Refresh reputation
+        loadMyReputation(blockchain.selectedAccount.address);
+      } else {
+        showNotification(result.message, 'error');
+      }
+    } catch (error: any) {
+      console.error('Error submitting feedback:', error);
+      showNotification(`Failed to submit feedback: ${error.message}`, 'error');
+    } finally {
+      setBlockchain(prev => ({ ...prev, loading: false }));
     }
   };
 
@@ -329,15 +435,45 @@ export default function BarterExchange() {
             loadListings();
             loadBalance();
           } else if (event.method === 'TradeCompleted') {
-            const [listingId, offerId] = event.data;
+            console.log('🔔 TradeCompleted event FIRED!');
+            const eventData = event.data.toJSON();
+            console.log('📋 Raw event data:', eventData);
+            
+            // Extract fields - handle both array and object formats
+            let listingId, offerId, seller, buyer;
+            if (Array.isArray(eventData)) {
+              [listingId, offerId, seller, buyer] = eventData;
+            } else {
+              listingId = eventData.listingId || eventData[0];
+              offerId = eventData.offerId || eventData[1];
+              seller = eventData.seller || eventData[2];
+              buyer = eventData.buyer || eventData[3];
+            }
+            
+            console.log('✅ Parsed Trade Details:', { listingId: listingId?.toString(), offerId: offerId?.toString(), seller: seller?.toString(), buyer: buyer?.toString() });
+            
+            // Check if current user is the seller (offer receiver)
+            const isCurrentUserSeller = seller?.toString() === blockchain.selectedAccount?.address;
+            console.log('👤 Is current user seller?', isCurrentUserSeller);
+            
             saveTransaction({
               type: 'Trade Completed',
-              listingId: listingId.toString(),
-              offerId: offerId.toString(),
+              listingId: listingId?.toString() || listingId?.toString(),
+              offerId: offerId?.toString() || offerId?.toString(),
               timestamp: Date.now(),
               status: 'success'
             });
             showNotification('✨ Trade completed!', 'success');
+            
+            // Show feedback modal if current user is the seller
+            if (isCurrentUserSeller && buyer) {
+              console.log('✅ SHOWING FEEDBACK MODAL');
+              setCompletedTrade({ offerer: buyer.toString(), listingId: listingId?.toString() || '' });
+              setShowFeedbackModal(true);
+            } else {
+              console.log('❌ NOT showing modal: not the seller or missing buyer address');
+            }
+            
             loadListings();
             loadMyOffers();
             loadAllOffers();
@@ -405,6 +541,7 @@ export default function BarterExchange() {
     try {
       setBlockchain(prev => ({ ...prev, loading: true }));
 
+      await web3Enable('Barter Exchange');
       const injector = await web3FromAddress(blockchain.selectedAccount.address);
 
       const resourceType = formData.resourceType.trim();
@@ -469,6 +606,7 @@ export default function BarterExchange() {
 
     try {
       setBlockchain(prev => ({ ...prev, loading: true }));
+      await web3Enable('Barter Exchange');
       const injector = await web3FromAddress(blockchain.selectedAccount.address);
 
       const listingIdNum = Number(selectedListingId);
@@ -507,6 +645,7 @@ export default function BarterExchange() {
 
     try {
       setBlockchain(prev => ({ ...prev, loading: true }));
+      await web3Enable('Barter Exchange');
       const injector = await web3FromAddress(blockchain.selectedAccount.address);
 
       await blockchain.api.tx.template
@@ -526,6 +665,7 @@ export default function BarterExchange() {
 
     try {
       setBlockchain(prev => ({ ...prev, loading: true }));
+      await web3Enable('Barter Exchange');
       const injector = await web3FromAddress(blockchain.selectedAccount.address);
 
       const unsub = await blockchain.api.tx.template
@@ -561,6 +701,7 @@ export default function BarterExchange() {
 
     try {
       setBlockchain(prev => ({ ...prev, loading: true }));
+      await web3Enable('Barter Exchange');
       const injector = await web3FromAddress(blockchain.selectedAccount.address);
 
       const unsub = await blockchain.api.tx.template
@@ -594,6 +735,7 @@ export default function BarterExchange() {
 
     try {
       setBlockchain(prev => ({ ...prev, loading: true }));
+      await web3Enable('Barter Exchange');
       const injector = await web3FromAddress(blockchain.selectedAccount.address);
 
       const unsub = await blockchain.api.tx.template
@@ -835,6 +977,16 @@ export default function BarterExchange() {
         onOpenSidebar={() => setSidebarOpen(true)}
       />
 
+      {/* Trust Score Navbar */}
+      {blockchain.selectedAccount && blockchain.connected && (
+        <TrustScoreNavbar 
+          reputationScore={myReputation}
+          onOpenFeedbackHistory={() => setShowFeedbackHistory(true)}
+          onOpenNotifications={() => setShowNotifications(true)}
+          pendingFeedbackCount={pendingFeedbacks.length}
+        />
+      )}
+
       {/* Sidebar */}
       <Sidebar
         isOpen={sidebarOpen}
@@ -871,6 +1023,14 @@ export default function BarterExchange() {
               viewMode={viewMode}
               onViewModeChange={setViewMode}
             />
+            {blockchain.selectedAccount && (
+              <div className="mb-8">
+                <ReputationCard 
+                  reputation={myReputation} 
+                  isLoading={blockchain.loading}
+                />
+              </div>
+            )}
             <SearchSection
               searchTerm={searchTerm}
               onSearchChange={setSearchTerm}
@@ -1008,6 +1168,46 @@ export default function BarterExchange() {
           onReject={rejectOffer}
           isLoading={blockchain.loading}
           acceptedOfferId={acceptedOfferId}
+        />
+      )}
+
+      {showFeedbackModal && completedTrade && (
+        <FeedbackModal
+          isOpen={showFeedbackModal}
+          counterpartyAddress={completedTrade.offerer}
+          onClose={() => {
+            setShowFeedbackModal(false);
+            setCompletedTrade(null);
+          }}
+          onSubmit={submitFeedbackHandler}
+          isLoading={blockchain.loading}
+        />
+      )}
+
+      {showFeedbackHistory && (
+        <FeedbackHistoryModal
+          isOpen={showFeedbackHistory}
+          onClose={() => setShowFeedbackHistory(false)}
+          feedbackHistory={feedbackHistory}
+        />
+      )}
+
+      {showNotifications && (
+        <NotificationsPanel
+          isOpen={showNotifications}
+          onClose={() => setShowNotifications(false)}
+          pendingFeedbacks={pendingFeedbacks}
+          onLeaveFeedback={(offerId) => {
+            const trade = pendingFeedbacks.find(p => p.id === offerId);
+            if (trade) {
+              setCompletedTrade({ 
+                offerer: trade.counterpartyAddress, 
+                listingId: trade.transactionId 
+              });
+              setShowFeedbackModal(true);
+              setShowNotifications(false);
+            }
+          }}
         />
       )}
 
