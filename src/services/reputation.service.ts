@@ -14,27 +14,36 @@ export const getReputationScore = async (
   accountId: string
 ): Promise<UIReputationScore | null> => {
   try {
-    // ReputationScores uses ValueQuery — returns the struct directly, never an Option
+    // ReputationScores uses ValueQuery — struct returned directly, never an Option.
+    // Rust snake_case fields are camelCase in Polkadot.js:
+    //   reputation_score → reputationScore
+    //   successful_transactions → successfulTransactions
+    //   failed_transactions → failedTransactions
+    //   total_disputes → totalDisputes
+    //   disputes_won → disputesWon
+    //   feedback_count → feedbackCount
+    //   rating_sum → ratingSum
     const score = await api.query.reputation.reputationScores(accountId) as any;
 
-    const overall = score.overallScore?.toNumber?.() ?? 0;
-    const successfulTx = score.successfulTransactions?.toNumber?.() ?? 0;
-    const failedTx = score.failedTransactions?.toNumber?.() ?? 0;
-    const totalFeedback = score.totalFeedback?.toNumber?.() ?? 0;
+    const successfulTx  = score.successfulTransactions?.toNumber?.() ?? 0;
+    const failedTx      = score.failedTransactions?.toNumber?.() ?? 0;
+    const feedbackCount = score.feedbackCount?.toNumber?.() ?? 0;
+    const totalDisputes = score.totalDisputes?.toNumber?.() ?? 0;
 
-    // All zeros means no record exists for this account
-    if (overall === 0 && successfulTx === 0 && failedTx === 0 && totalFeedback === 0) {
+    // Default struct has reputation_score=5000 and all counters=0.
+    // "No history" means no activity has ever been recorded.
+    if (successfulTx === 0 && failedTx === 0 && feedbackCount === 0 && totalDisputes === 0) {
       return null;
     }
+
+    const overall = score.reputationScore?.toNumber?.() ?? 5000;
+    const ratingSum = score.ratingSum?.toNumber?.() ?? 0;
 
     const reliability =
       successfulTx + failedTx > 0
         ? (successfulTx / (successfulTx + failedTx)) * 100
         : 0;
-    const avgRating =
-      totalFeedback > 0
-        ? (score.feedbackComponent?.toNumber?.() ?? 0) / totalFeedback
-        : 0;
+    const avgRating = feedbackCount > 0 ? ratingSum / feedbackCount : 0;
 
     let trustLevel: UIReputationScore['trustLevel'] = 'unproven';
     if (overall >= TRUST_LEVELS.EXCELLENT.min)
@@ -53,7 +62,7 @@ export const getReputationScore = async (
       failedTransactions: failedTx,
       reliability,
       averageRating: avgRating,
-      totalFeedback
+      totalFeedback: feedbackCount
     };
   } catch (error) {
     console.error('Error fetching reputation score:', error);
