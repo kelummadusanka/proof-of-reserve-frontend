@@ -1070,6 +1070,7 @@ export default function BarterExchange() {
                     setSelectedListingId(id);
                     setShowViewOffersModal(true);
                   }}
+                  api={blockchain.api}
                 />
               </>
             )}
@@ -1096,12 +1097,14 @@ export default function BarterExchange() {
       {showOfferModal && (
         <MakeOfferModal
           listingId={selectedListingId}
+          listingOwner={listings.find(l => l.id === selectedListingId)?.owner}
           onClose={() => {
             setShowOfferModal(false);
             setSelectedListingId(null);
           }}
           onSubmit={makeOffer}
           isLoading={blockchain.loading}
+          api={blockchain.api}
         />
       )}
 
@@ -1168,6 +1171,7 @@ export default function BarterExchange() {
           onReject={rejectOffer}
           isLoading={blockchain.loading}
           acceptedOfferId={acceptedOfferId}
+          api={blockchain.api}
         />
       )}
 

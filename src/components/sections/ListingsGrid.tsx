@@ -1,4 +1,5 @@
 import React from 'react';
+import { ApiPromise } from '@polkadot/api';
 import { Boxes } from 'lucide-react';
 import { EmptyState } from '../common/EmptyState';
 import ListingCardComponent from '../cards/ListingCardComponent';
@@ -19,6 +20,7 @@ interface ListingsGridProps {
   onMakeOffer: (listingId: string) => void;
   onCancelListing: (listingId: string) => void;
   onViewOffers?: (listingId: string) => void;
+  api?: ApiPromise | null;
 }
 
 export const ListingsGrid: React.FC<ListingsGridProps> = ({
@@ -31,7 +33,8 @@ export const ListingsGrid: React.FC<ListingsGridProps> = ({
   allOffers = [],
   onMakeOffer,
   onCancelListing,
-  onViewOffers
+  onViewOffers,
+  api = null,
 }) => {
   if (listings.length === 0) {
     return (
@@ -84,6 +87,7 @@ export const ListingsGrid: React.FC<ListingsGridProps> = ({
             onCancelListing={onCancelListing}
             onViewOffers={onViewOffers}
             isLoading={isLoading}
+            api={api}
           />
         );
       })}

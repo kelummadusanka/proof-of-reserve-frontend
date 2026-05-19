@@ -14,26 +14,28 @@ export const getReputationScore = async (
   accountId: string
 ): Promise<UIReputationScore | null> => {
   try {
-    const score = await api.query.reputation.reputationScores(accountId);
+    // ReputationScores uses ValueQuery — returns the struct directly, never an Option
+    const score = await api.query.reputation.reputationScores(accountId) as any;
 
-    if (score.isNone) {
+    const overall = score.overallScore?.toNumber?.() ?? 0;
+    const successfulTx = score.successfulTransactions?.toNumber?.() ?? 0;
+    const failedTx = score.failedTransactions?.toNumber?.() ?? 0;
+    const totalFeedback = score.totalFeedback?.toNumber?.() ?? 0;
+
+    // All zeros means no record exists for this account
+    if (overall === 0 && successfulTx === 0 && failedTx === 0 && totalFeedback === 0) {
       return null;
     }
 
-    const scoreData = score.unwrap();
-    const overall = scoreData.overallScore.toNumber();
-    const successfulTx = scoreData.successfulTransactions.toNumber();
-    const failedTx = scoreData.failedTransactions.toNumber();
     const reliability =
       successfulTx + failedTx > 0
         ? (successfulTx / (successfulTx + failedTx)) * 100
         : 0;
     const avgRating =
-      scoreData.totalFeedback > 0
-        ? scoreData.feedbackComponent.toNumber() / scoreData.totalFeedback.toNumber()
+      totalFeedback > 0
+        ? (score.feedbackComponent?.toNumber?.() ?? 0) / totalFeedback
         : 0;
 
-    // Determine trust level
     let trustLevel: UIReputationScore['trustLevel'] = 'unproven';
     if (overall >= TRUST_LEVELS.EXCELLENT.min)
       trustLevel = TRUST_LEVELS.EXCELLENT.label;
@@ -51,7 +53,7 @@ export const getReputationScore = async (
       failedTransactions: failedTx,
       reliability,
       averageRating: avgRating,
-      totalFeedback: scoreData.totalFeedback.toNumber()
+      totalFeedback
     };
   } catch (error) {
     console.error('Error fetching reputation score:', error);

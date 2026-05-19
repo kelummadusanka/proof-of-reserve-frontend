@@ -1,18 +1,24 @@
 import React, { useState } from 'react';
-import { X, Plus, Sparkles, ArrowRight } from 'lucide-react';
+import { ApiPromise } from '@polkadot/api';
+import { X, Plus, Sparkles, ArrowRight, User } from 'lucide-react';
+import { TrustBadge } from '../ui/TrustBadge';
 
 interface MakeOfferModalProps {
   listingId: string | null;
+  listingOwner?: string;
   onClose: () => void;
   onSubmit: (offerData: any) => Promise<void>;
   isLoading: boolean;
+  api?: ApiPromise | null;
 }
 
 export const MakeOfferModal: React.FC<MakeOfferModalProps> = ({
   listingId,
+  listingOwner,
   onClose,
   onSubmit,
-  isLoading
+  isLoading,
+  api = null,
 }) => {
   const [offerData, setOfferData] = useState({
     resources: [{ type: '', id: '', metadata: '' }]
@@ -51,8 +57,17 @@ export const MakeOfferModal: React.FC<MakeOfferModalProps> = ({
           </button>
         </div>
 
-        <div className="mb-6">
-          <p className="text-gray-300">Listing ID: <span className="text-purple-400 font-bold">#{listingId}</span></p>
+        {/* Listing info + lister trust score */}
+        <div className="mb-6 p-4 rounded-2xl bg-slate-800/50 border border-purple-500/20 space-y-2">
+          <p className="text-gray-300 text-sm">Listing ID: <span className="text-purple-400 font-bold">#{listingId}</span></p>
+          {listingOwner && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <User className="w-4 h-4 text-gray-400" />
+              <span className="text-gray-400 text-xs">Lister:</span>
+              <span className="text-gray-200 font-mono text-xs">{listingOwner.slice(0, 10)}...{listingOwner.slice(-8)}</span>
+              <TrustBadge api={api} address={listingOwner} />
+            </div>
+          )}
         </div>
 
         <div className="space-y-4 mb-6">

@@ -1,6 +1,8 @@
 import React from 'react';
+import { ApiPromise } from '@polkadot/api';
 import { Sparkles, ArrowRight, X, Check, Lock, Unlock, Eye, TrendingUp, TrendingDown } from 'lucide-react';
 import { Listing, Offer } from '../../types';
+import { TrustBadge } from '../ui/TrustBadge';
 
 interface ListingCardProps {
   listing: Listing;
@@ -20,6 +22,7 @@ interface ListingCardProps {
   onCancelListing: (listingId: string) => void;
   onViewOffers?: (listingId: string) => void;
   isLoading: boolean;
+  api?: ApiPromise | null;
 }
 
 export const ListingCardComponent: React.FC<ListingCardProps> = ({
@@ -35,7 +38,8 @@ export const ListingCardComponent: React.FC<ListingCardProps> = ({
   onMakeOffer,
   onCancelListing,
   onViewOffers,
-  isLoading
+  isLoading,
+  api = null,
 }) => {
   return (
     <div
@@ -191,14 +195,34 @@ export const ListingCardComponent: React.FC<ListingCardProps> = ({
       )}
 
       {/* Owner */}
-      <div className="flex items-center gap-2 mb-6 p-3 rounded-xl bg-slate-800/50">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-          <span className="text-white text-xs font-bold">{listing.owner.slice(0, 2)}</span>
+      <div className="mb-6 p-3 rounded-xl bg-slate-800/50 space-y-2">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center shrink-0">
+            <span className="text-white text-xs font-bold">{listing.owner.slice(0, 2)}</span>
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs text-gray-500">Lister</p>
+            <p className="text-xs text-gray-300 font-mono truncate">{listing.owner.slice(0, 12)}...{listing.owner.slice(-8)}</p>
+          </div>
+          {!isOwner && (
+            <TrustBadge api={api} address={listing.owner} />
+          )}
         </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-xs text-gray-500">Owner</p>
-          <p className="text-xs text-gray-300 font-mono truncate">{listing.owner.slice(0, 12)}...{listing.owner.slice(-8)}</p>
-        </div>
+        {/* Private listing: show target account trust score */}
+        {listing.targetAccount && (
+          <div className="flex items-center gap-2 pt-1 border-t border-slate-700/50">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-500 flex items-center justify-center shrink-0">
+              <Lock className="w-3.5 h-3.5 text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-gray-500">Private Target</p>
+              <p className="text-xs text-gray-300 font-mono truncate">{listing.targetAccount.slice(0, 12)}...{listing.targetAccount.slice(-8)}</p>
+            </div>
+            {isOwner && (
+              <TrustBadge api={api} address={listing.targetAccount} />
+            )}
+          </div>
+        )}
       </div>
 
       {/* Actions */}

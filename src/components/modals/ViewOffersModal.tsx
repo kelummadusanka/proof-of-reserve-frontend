@@ -1,6 +1,8 @@
 import React from 'react';
+import { ApiPromise } from '@polkadot/api';
 import { X, CheckCircle, XCircle, TrendingUp, Clock } from 'lucide-react';
 import { Offer, Listing, Resource } from '../../types';
+import { TrustBadge } from '../ui/TrustBadge';
 
 interface ViewOffersModalProps {
   listing: Listing | null;
@@ -10,6 +12,7 @@ interface ViewOffersModalProps {
   onReject: (offerId: string) => Promise<void>;
   isLoading: boolean;
   acceptedOfferId?: string | null;
+  api?: ApiPromise | null;
 }
 
 export const ViewOffersModal: React.FC<ViewOffersModalProps> = ({
@@ -19,7 +22,8 @@ export const ViewOffersModal: React.FC<ViewOffersModalProps> = ({
   onAccept,
   onReject,
   isLoading,
-  acceptedOfferId
+  acceptedOfferId,
+  api = null,
 }) => {
   if (!listing) return null;
 
@@ -81,12 +85,15 @@ export const ViewOffersModal: React.FC<ViewOffersModalProps> = ({
                 {/* Offer Header */}
                 <div className="flex items-start justify-between mb-4">
                   <div className="flex-1">
-                    <p className="text-white font-bold text-lg">
-                      Offer from:{' '}
-                      <span className="text-purple-400 font-mono text-sm">
-                        {offer.offerer.slice(0, 10)}...{offer.offerer.slice(-10)}
-                      </span>
-                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-white font-bold text-lg">
+                        Offer from:{' '}
+                        <span className="text-purple-400 font-mono text-sm">
+                          {offer.offerer.slice(0, 10)}...{offer.offerer.slice(-10)}
+                        </span>
+                      </p>
+                      <TrustBadge api={api} address={offer.offerer} />
+                    </div>
                     <p className="text-gray-400 text-sm mt-1 flex items-center gap-2">
                       <Clock className="w-4 h-4" />
                       Created: {new Date(offer.createdAt).toLocaleDateString()}
